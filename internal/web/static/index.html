@@ -65,7 +65,15 @@
   .row>div{flex:1}
 
   /* CDN single-select list */
-  .sec-title{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:4px 0 8px}
+  .sec-title{display:flex;align-items:center;justify-content:space-between;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:4px 0 8px}
+  .reload-all{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;
+    border:1px solid var(--border-hi);border-radius:7px;background:rgba(124,108,255,.1);color:#cdb3ff;font-size:13px;
+    cursor:pointer;transition:background .2s,box-shadow .2s}
+  .reload-all:hover{background:rgba(168,85,247,.18);box-shadow:0 0 12px rgba(168,85,247,.3)}
+  .reload-all:disabled{opacity:.5;cursor:not-allowed}
+  .reload-all .ra-ic{display:inline-block;line-height:1}
+  .reload-all.spin .ra-ic{animation:raspin .8s linear infinite}
+  @keyframes raspin{to{transform:rotate(360deg)}}
   .cdns{display:flex;flex-direction:column;gap:8px}
   .pick{display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(10,9,28,.55);
     border:1px solid var(--border);border-radius:10px;padding:11px 14px;cursor:pointer;user-select:none;
@@ -168,7 +176,7 @@
   <img class="logo" src="/static/logo.png" alt="RainScanner logo" />
   <div class="brand">
     <!-- keep version in sync with the `version` const in cmd/cdnscan/main.go -->
-    <h1>RainScanner <span class="ver">v1.1.0</span></h1>
+    <h1>RainScanner <span class="ver">v1.1.1</span></h1>
     <span class="tag">unified CDN clean-IP scanner · real Xray latency</span>
   </div>
   <div class="xupd">
@@ -182,7 +190,8 @@
 <div class="wrap">
   <!-- ───────── left: target + settings ───────── -->
   <div class="panel left">
-    <div class="sec-title">Target (pick one)</div>
+    <div class="sec-title"><span>Target (pick one)</span>
+      <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs from their sources"><span class="ra-ic">⟳</span></button></div>
     <div class="cdns" id="cdns"></div>
     <div class="addcustom" id="addcustom">Add custom +</div>
 
@@ -381,6 +390,23 @@ function showRanges(cidrs){
   if(!cidrs.length) $('ranges').innerHTML='<div class="empty">no ranges</div>';
 }
 
+// Re-fetch ranges for every CDN (and any custom with an API URL) from source,
+// then refresh the list + the selected target's preview.
+async function reloadAllCdns(){
+  const b=$('reloadAll'); b.disabled=true; b.classList.add('spin');
+  try{
+    const r=await fetch('/api/targets/reload-all',{method:'POST'});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){ alert('reload failed: '+((d&&d.error)||r.status)); return; }
+    await loadTargets(true);
+    const fails=(d.results||[]).filter(x=>x.error);
+    if(fails.length){
+      alert('Reloaded '+d.reloaded+' CDN(s); '+d.failed+' failed:\n'+fails.map(f=>'• '+f.name+': '+f.error).join('\n'));
+    }
+  }catch(e){ alert('reload failed: '+e); }
+  finally{ b.disabled=false; b.classList.remove('spin'); }
+}
+
 // ── log (style preserved) ──
 function logLine(text, cls){
   const el=$('log'); const span=document.createElement('div');
@@ -566,6 +592,7 @@ $('cCancel').onclick=closeModal;
 $('cSave').onclick=saveCustom;
 $('cDelete').onclick=deleteTarget;
 $('cReload').onclick=reloadRanges;
+$('reloadAll').onclick=reloadAllCdns;
 $('cRanges').oninput=countRanges;
 $('overlay').onclick=e=>{ if(e.target===$('overlay')) closeModal(); };
 

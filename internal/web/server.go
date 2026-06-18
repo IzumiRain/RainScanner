@@ -87,6 +87,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/ranges", s.handleRanges)
 	mux.HandleFunc("/api/targets", s.handleTargets)
 	mux.HandleFunc("/api/targets/reload", s.handleTargetReload)
+	mux.HandleFunc("/api/targets/reload-all", s.handleTargetReloadAll)
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/stream", s.handleStream)
@@ -196,6 +197,40 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rec)
+}
+
+// handleTargetReloadAll re-fetches every target that has an API URL to reload
+// from (all built-in CDNs, plus any custom with a URL) and persists the refreshed
+// ranges. It always returns 200 with a per-target summary so the GUI can report
+// partial success — one feed being down doesn't fail the whole reload.
+func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	type result struct {
+		Name  string `json:"name"`
+		Count int    `json:"count"`
+		Error string `json:"error,omitempty"`
+	}
+	var results []result
+	reloaded, failed := 0, 0
+	for _, rec := range s.store.List() {
+		if rec.APIURL == "" {
+			continue // nothing to reload from (e.g. a manual custom CIDR set)
+		}
+		res := result{Name: rec.Name}
+		if rr, err := s.store.Reload(r.Context(), client, rec.Name); err != nil {
+			res.Error = err.Error()
+			failed++
+		} else {
+			res.Count = len(rr.CIDRs)
+			reloaded++
+		}
+		results = append(results, res)
+	}
+	writeJSON(w, map[string]any{"reloaded": reloaded, "failed": failed, "results": results})
 }
 
 type customReq struct {

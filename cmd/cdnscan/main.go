@@ -29,7 +29,7 @@ import (
 
 // version is the released product version, surfaced via the -version flag and
 // the GUI launch banner. Bump it on each tagged release.
-const version = "1.1.0"
+const version = "1.1.1"
 
 func main() {
 	var (
