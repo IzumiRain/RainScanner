@@ -23,15 +23,32 @@ jobs:
           - goos: windows
             goarch: amd64
             asset: rainscan-windows-amd64.exe
+            xray_asset: Xray-windows-64.zip          # xray-core release asset for this target
+            embed_dest: internal/xray/assets/xray-windows-amd64.zip
           - goos: linux
             goarch: amd64
             asset: rainscan-linux-amd64
+            xray_asset: Xray-linux-64.zip
+            embed_dest: internal/xray/assets/xray-linux-amd64.zip
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod   # tracks the toolchain pinned in go.mod (go 1.26)
+
+      # Bake the matching xray-core into the binary: overwrite the committed
+      # placeholder zip with the real release asset before compiling, so embed picks
+      # it up. (A plain `go build` without this step embeds the empty placeholder.)
+      - name: fetch xray-core for embedding
+        env:
+          XRAY_ASSET: ${{ matrix.xray_asset }}
+          EMBED_DEST: ${{ matrix.embed_dest }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download --repo XTLS/Xray-core --pattern "$XRAY_ASSET" --output "$EMBED_DEST" --clobber
+          ls -l "$EMBED_DEST"
 
       - name: build
         env:

@@ -66,34 +66,40 @@ Cached ranges live in `ips/<cdn>.json`; confirmed results in `results/<cdn>.json
 ## Setup
 
 RainScanner runs on **Windows** and **Linux** (tested on **WSL Ubuntu 24.04**).
-You need [Go 1.26+](https://go.dev/dl/) to build, and `xray-core` for Stage-2
-latency confirmation (Stage-1 TCP scanning works without it).
 
-### Windows
+### Use a release (recommended)
+
+Download the binary for your OS from the [Releases](https://github.com/IzumiRain/RainScanner/releases)
+page and run it — **xray-core is bundled inside the binary**, so there's nothing
+else to install. It's extracted to a per-user cache dir on first use.
 
 ```powershell
-git clone https://github.com/IzumiRain/RainScanner.git ; cd RainScanner
-go build -o rainscan.exe ./cmd/cdnscan
-
-.\rainscan.exe -update-xray     # downloads xray-core + geoip/geosite into the project folder
-.\rainscan.exe -serve           # GUI at http://127.0.0.1:8787 (also opens on bare double-click)
+.\rainscan-windows-amd64.exe          # GUI at http://127.0.0.1:8787 (also opens on bare double-click)
 ```
 
-### Linux / WSL
+```bash
+./rainscan-linux-amd64 -serve         # GUI at http://127.0.0.1:8787
+# from a Windows browser against a WSL instance, bind all interfaces:
+./rainscan-linux-amd64 -serve -addr 0.0.0.0:8787
+```
+
+### Build from source
+
+You need [Go 1.26+](https://go.dev/dl/). A plain `go build` bakes in an empty
+placeholder for xray; run `scripts/fetch-xray.sh` first to embed the real
+xray-core (as the release build does), **or** just keep an `xray` / `xray.exe`
+binary on `PATH` (or pass `--xray /path/to/xray`) and skip the fetch.
 
 ```bash
 git clone https://github.com/IzumiRain/RainScanner.git && cd RainScanner
-go build -o rainscan ./cmd/cdnscan
-
-./rainscan -update-xray         # downloads the linux/amd64 (or arm64) xray-core + geo data
-./rainscan -serve               # GUI at http://127.0.0.1:8787
-# from a Windows browser against a WSL instance, bind all interfaces:
-./rainscan -serve -addr 0.0.0.0:8787
+./scripts/fetch-xray.sh               # optional: embed xray into the binary
+go build -o rainscan ./cmd/cdnscan    # rainscan.exe on Windows
+./rainscan -serve
 ```
 
-> `-update-xray` auto-picks the right OS/arch build. To use an existing
-> `xray-core` instead, put it on `PATH` (or pass `--xray /path/to/xray`); the
-> `geoip.dat` / `geosite.dat` files must sit alongside the xray binary.
+> Stage-1 (TCP scanning) works with no xray at all; xray is only needed for the
+> Stage-2 real-latency confirmation. The probe configs don't use geo routing, so
+> `geoip.dat` / `geosite.dat` are **not** required.
 
 ## Usage
 

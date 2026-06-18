@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -91,8 +90,6 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/stream", s.handleStream)
-	mux.HandleFunc("/api/xray/version", s.handleXrayVersion)
-	mux.HandleFunc("/api/xray/update", s.handleXrayUpdate)
 	return http.Serve(ln, mux)
 }
 
@@ -320,68 +317,6 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"stopping": true})
 }
 
-// resolveXrayPath picks the xray binary to inspect/update: an explicit path wins,
-// then PATH/local discovery; if nothing is found yet it falls back to a default
-// local name so a first-time install lands next to the scanner.
-func resolveXrayPath(explicit string) string {
-	if explicit != "" {
-		return explicit
-	}
-	if p, err := xray.FindBinary(""); err == nil {
-		return p
-	}
-	if runtime.GOOS == "windows" {
-		return "xray.exe"
-	}
-	return "xray"
-}
-
-// handleXrayVersion reports the installed xray-core version vs the latest release.
-// Optional ?path= overrides which binary is inspected.
-func (s *Server) handleXrayVersion(w http.ResponseWriter, r *http.Request) {
-	bin := resolveXrayPath(r.URL.Query().Get("path"))
-	client := &http.Client{Timeout: 20 * time.Second}
-	info, err := xray.CheckUpdate(r.Context(), client, bin)
-	if err != nil {
-		// Still surface what we know (e.g. installed version) alongside the error.
-		writeJSON(w, map[string]any{
-			"current":          info.Current,
-			"latest":           info.Latest,
-			"asset":            info.Asset,
-			"update_available": info.UpdateAvailable,
-			"supported":        info.Supported,
-			"error":            err.Error(),
-		})
-		return
-	}
-	writeJSON(w, info)
-}
-
-// handleXrayUpdate downloads and installs the latest xray-core (binary + geo data).
-// It refuses while a scan is running so it can't replace a binary mid-use.
-func (s *Server) handleXrayUpdate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
-		return
-	}
-	if s.scanning.Load() {
-		http.Error(w, "a scan is running; stop it before updating xray", http.StatusConflict)
-		return
-	}
-	var req struct {
-		Path string `json:"path"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&req) // body optional
-	bin := resolveXrayPath(req.Path)
-	client := &http.Client{Timeout: 5 * time.Minute}
-	version, err := xray.Update(r.Context(), client, bin, true)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	writeJSON(w, map[string]any{"ok": true, "version": version})
-}
-
 // buildResult flattens the single-target summary into the GUI payload, deriving
 // the TCP-reachable IP list and, when a link was provided, the per-IP configs
 // with the clean candidate substituted in.
@@ -424,7 +359,7 @@ func (s *Server) buildConfig(req scanReq) (pipeline.Config, error) {
 		if err != nil {
 			return pipeline.Config{}, fmt.Errorf("parse link: %w", err)
 		}
-		bin, err := xray.FindBinary(req.XrayPath)
+		bin, err := xray.Resolve(req.XrayPath)
 		if err != nil {
 			return pipeline.Config{}, err
 		}

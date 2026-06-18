@@ -29,7 +29,7 @@ import (
 
 // version is the released product version, surfaced via the -version flag and
 // the GUI launch banner. Bump it on each tagged release.
-const version = "1.0.0"
+const version = "1.1.0"
 
 func main() {
 	var (
@@ -56,7 +56,6 @@ func main() {
 		resultsDir  = flag.String("results-dir", "results", "directory for confirmed results")
 		listCDN     = flag.Bool("list", false, "list supported CDNs and exit")
 		showVersion = flag.Bool("version", false, "print version and exit")
-		updateXray  = flag.Bool("update-xray", false, "download & install the latest xray-core, then exit")
 		serve       = flag.Bool("serve", false, "launch the web GUI instead of a CLI scan")
 		addr        = flag.String("addr", "127.0.0.1:8787", "web GUI listen address (with -serve)")
 	)
@@ -72,11 +71,6 @@ func main() {
 	// Explorer, so default to the GUI instead of erroring out with "no CDN".
 	if flag.NFlag() == 0 && flag.NArg() == 0 {
 		*serve = true
-	}
-
-	if *updateXray {
-		runXrayUpdate(*xrayPath)
-		return
 	}
 
 	if *serve {
@@ -136,7 +130,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("parse link: %v", err)
 		}
-		bin, err := xray.FindBinary(*xrayPath)
+		bin, err := xray.Resolve(*xrayPath)
 		if err != nil {
 			log.Fatalf("%v", err)
 		}
@@ -301,43 +295,6 @@ func parsePorts(arg string, fallback int) []int {
 
 // guiURL turns a listen address into a browser-openable URL, mapping wildcard
 // binds (":8787", "0.0.0.0:8787") to a loopback host the browser can reach.
-// runXrayUpdate checks the installed xray-core against the latest release and, if
-// newer, downloads and installs it (binary + geo data), then exits.
-func runXrayUpdate(explicit string) {
-	bin := explicit
-	if bin == "" {
-		if p, err := xray.FindBinary(""); err == nil {
-			bin = p
-		} else if runtime.GOOS == "windows" {
-			bin = "xray.exe"
-		} else {
-			bin = "xray"
-		}
-	}
-	client := &http.Client{Timeout: 5 * time.Minute}
-	ctx := context.Background()
-	info, err := xray.CheckUpdate(ctx, client, bin)
-	if err != nil {
-		log.Fatalf("check update: %v", err)
-	}
-	if info.Current != "" {
-		fmt.Printf("installed xray: %s\n", info.Current)
-	} else {
-		fmt.Println("installed xray: (not found)")
-	}
-	fmt.Printf("latest release: %s\n", info.Latest)
-	if !info.UpdateAvailable && info.Current != "" {
-		fmt.Println("already up to date.")
-		return
-	}
-	fmt.Println("downloading and installing latest xray-core...")
-	v, err := xray.Update(ctx, client, bin, true)
-	if err != nil {
-		log.Fatalf("update: %v", err)
-	}
-	fmt.Printf("xray updated to %s\n", v)
-}
-
 func guiURL(addr string) string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {

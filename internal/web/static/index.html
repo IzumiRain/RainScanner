@@ -50,14 +50,6 @@
     transition:transform .15s,box-shadow .2s,background .2s,border-color .2s}
   header .xupd a.gh:hover{background:rgba(124,108,255,.22);border-color:var(--purple);box-shadow:0 0 16px rgba(124,108,255,.35);transform:translateY(-1px)}
   header .xupd a.gh svg{width:15px;height:15px;fill:currentColor}
-  header .xupd button{white-space:nowrap;border-radius:999px;padding:7px 15px;font-size:12px;font-weight:700;cursor:pointer;
-    border:1px solid var(--border-hi);background:rgba(124,108,255,.1);color:#d6d0ff;
-    transition:transform .15s,box-shadow .2s,background .2s,border-color .2s}
-  header .xupd button:hover{background:rgba(124,108,255,.22);border-color:var(--purple);box-shadow:0 0 16px rgba(124,108,255,.35);transform:translateY(-1px)}
-  header .xupd button:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
-  header .xupd #xrayUpdate{background:var(--grad);border:0;color:#fff;box-shadow:0 4px 16px rgba(168,85,247,.42)}
-  /* keep the status to a single truncated line so it never grows the header height (full text on hover) */
-  header .xupd #xrayVerMsg{font-size:11px;color:var(--muted);max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   @media(max-width:720px){header .tag{display:none}}
   .wrap{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 69px)}
   .panel{padding:18px;overflow:auto;animation:fadeUp .45s ease both}
@@ -176,7 +168,7 @@
   <img class="logo" src="/static/logo.png" alt="RainScanner logo" />
   <div class="brand">
     <!-- keep version in sync with the `version` const in cmd/cdnscan/main.go -->
-    <h1>RainScanner <span class="ver">v1.0.0</span></h1>
+    <h1>RainScanner <span class="ver">v1.1.0</span></h1>
     <span class="tag">unified CDN clean-IP scanner · real Xray latency</span>
   </div>
   <div class="xupd">
@@ -184,9 +176,6 @@
       <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
       GitHub
     </a>
-    <button id="xrayCheck">Check for xray updates</button>
-    <button id="xrayUpdate" style="display:none">⬇ Update now</button>
-    <span id="xrayVerMsg"></span>
   </div>
 </header>
 
@@ -561,45 +550,6 @@ async function reloadRanges(){
   }catch(e){ $('cReloadMsg').textContent='reload failed: '+e; }
   finally{ $('cReload').disabled=false; }
 }
-
-// ── xray update ──
-async function checkXray(){
-  $('xrayVerMsg').textContent='checking…'; $('xrayCheck').disabled=true; $('xrayUpdate').style.display='none';
-  try{
-    const path=$('xray').value.trim();
-    const r=await fetch('/api/xray/version'+(path?('?path='+encodeURIComponent(path)):''));
-    const d=await r.json();
-    if(!d.supported){ $('xrayVerMsg').textContent='no xray-core build for this OS/arch'; return; }
-    const cur=d.current||'(not installed)';
-    if(d.error){ $('xrayVerMsg').textContent='installed '+cur+' · check failed: '+d.error; return; }
-    if(d.update_available){
-      $('xrayVerMsg').textContent='installed '+cur+' → latest '+d.latest+' available';
-      $('xrayUpdate').style.display='';
-    } else {
-      $('xrayVerMsg').textContent='installed '+cur+' · up to date (latest '+d.latest+')';
-    }
-  }catch(e){ $('xrayVerMsg').textContent='check failed: '+e; }
-  finally{ $('xrayCheck').disabled=false; }
-}
-async function updateXray(){
-  $('xrayVerMsg').textContent='downloading & installing… (this can take a minute)';
-  $('xrayUpdate').disabled=true; $('xrayCheck').disabled=true;
-  try{
-    const path=$('xray').value.trim();
-    const r=await fetch('/api/xray/update',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({path})});
-    if(!r.ok){ $('xrayVerMsg').textContent='update failed: '+await r.text(); return; }
-    const d=await r.json();
-    $('xrayVerMsg').textContent='updated to '+d.version+' ✓';
-    $('xrayUpdate').style.display='none';
-  }catch(e){ $('xrayVerMsg').textContent='update failed: '+e; }
-  finally{ $('xrayUpdate').disabled=false; $('xrayCheck').disabled=false; }
-}
-// Mirror the (possibly truncated) status text into the title attribute so the
-// full message is always readable on hover.
-(()=>{const e=$('xrayVerMsg');new MutationObserver(()=>{e.title=e.textContent;}).observe(e,{childList:true,characterData:true,subtree:true});})();
-$('xrayCheck').onclick=checkXray;
-$('xrayUpdate').onclick=updateXray;
 
 // ── copy helpers ──
 function copyText(text, btn, ok='copied!'){
