@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>RainScanner — clean CDN IP finder</title>
+<link rel="icon" type="image/png" href="/static/logo-circle.png" />
+<style>
+  :root{
+    --bg:#0a0a1f; --panel:rgba(26,21,54,.62); --panel-solid:#15102e;
+    --border:rgba(139,123,255,.16); --border-hi:rgba(139,123,255,.42);
+    --fg:#ece9ff; --muted:#9b93c7;
+    --blue:#4f8cff; --purple:#a855f7; --pink:#ec4899; --accent:#7c6cff;
+    --ok:#36d399; --warn:#e0a64a; --err:#ff5d7a;
+    --grad:linear-gradient(135deg,var(--blue),var(--purple),var(--pink));
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;color:var(--fg);font-family:Arial,Helvetica,system-ui,Segoe UI,Roboto,sans-serif;font-size:14px;
+    background:
+      radial-gradient(1100px 560px at 12% -10%, rgba(79,140,255,.20), transparent 60%),
+      radial-gradient(1000px 680px at 112% 6%, rgba(236,72,153,.16), transparent 55%),
+      radial-gradient(900px 900px at 50% 118%, rgba(168,85,247,.18), transparent 60%),
+      var(--bg);
+    background-attachment:fixed}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
+  @keyframes fadeDown{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:none}}
+  @keyframes flow{to{background-position:200% 0}}
+  @keyframes glow{0%,100%{box-shadow:0 0 0 1px rgba(139,123,255,.4),0 0 14px rgba(79,140,255,.5)}
+    50%{box-shadow:0 0 0 1px rgba(236,72,153,.45),0 0 24px rgba(168,85,247,.75)}}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-thumb{background:rgba(124,108,255,.3);border-radius:8px}
+  ::-webkit-scrollbar-thumb:hover{background:rgba(124,108,255,.5)}
+  ::-webkit-scrollbar-track{background:transparent}
+  header{padding:13px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:13px;
+    background:rgba(13,10,33,.55);backdrop-filter:blur(10px);position:sticky;top:0;z-index:5;animation:fadeDown .5s ease both}
+  header .logo{width:42px;height:42px;border-radius:50%;flex:none;object-fit:cover;animation:glow 3.6s ease-in-out infinite}
+  header .brand{display:flex;flex-direction:column;gap:1px}
+  header h1{font-size:19px;margin:0;font-weight:800;letter-spacing:.02em;
+    background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  header .tag{color:var(--muted);font-size:12px}
+  /* version pill next to the wordmark; override the h1 gradient text-fill so it stays solid */
+  header h1 .ver{font-size:11px;font-weight:700;vertical-align:middle;margin-left:8px;padding:1px 8px;border-radius:999px;
+    letter-spacing:.02em;color:var(--blue);-webkit-text-fill-color:var(--blue);background:rgba(79,140,255,.14);border:1px solid rgba(79,140,255,.38)}
+  header .xupd{margin-left:auto;display:flex;align-items:center;gap:9px;flex-wrap:wrap;justify-content:flex-end}
+  /* GitHub link styled like the xupd buttons */
+  header .xupd a.gh{display:inline-flex;align-items:center;gap:7px;text-decoration:none;white-space:nowrap;border-radius:999px;
+    padding:7px 14px;font-size:12px;font-weight:700;border:1px solid var(--border-hi);background:rgba(124,108,255,.1);color:#d6d0ff;
+    transition:transform .15s,box-shadow .2s,background .2s,border-color .2s}
+  header .xupd a.gh:hover{background:rgba(124,108,255,.22);border-color:var(--purple);box-shadow:0 0 16px rgba(124,108,255,.35);transform:translateY(-1px)}
+  header .xupd a.gh svg{width:15px;height:15px;fill:currentColor}
+  header .xupd button{white-space:nowrap;border-radius:999px;padding:7px 15px;font-size:12px;font-weight:700;cursor:pointer;
+    border:1px solid var(--border-hi);background:rgba(124,108,255,.1);color:#d6d0ff;
+    transition:transform .15s,box-shadow .2s,background .2s,border-color .2s}
+  header .xupd button:hover{background:rgba(124,108,255,.22);border-color:var(--purple);box-shadow:0 0 16px rgba(124,108,255,.35);transform:translateY(-1px)}
+  header .xupd button:disabled{opacity:.55;cursor:not-allowed;transform:none;box-shadow:none}
+  header .xupd #xrayUpdate{background:var(--grad);border:0;color:#fff;box-shadow:0 4px 16px rgba(168,85,247,.42)}
+  /* keep the status to a single truncated line so it never grows the header height (full text on hover) */
+  header .xupd #xrayVerMsg{font-size:11px;color:var(--muted);max-width:300px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  @media(max-width:720px){header .tag{display:none}}
+  .wrap{display:grid;grid-template-columns:300px 1fr;gap:0;height:calc(100vh - 69px)}
+  .panel{padding:18px;overflow:auto;animation:fadeUp .45s ease both}
+  .panel.left{border-right:1px solid var(--border)}
+  label{display:block;font-size:12px;color:var(--muted);margin:14px 0 5px}
+  input[type=text],input[type=number],select,textarea{
+    width:100%;background:rgba(10,9,28,.7);border:1px solid var(--border);color:var(--fg);
+    border-radius:8px;padding:9px 11px;font-size:13px;font-family:var(--mono);transition:border-color .15s,box-shadow .15s}
+  input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,255,.18)}
+  textarea{resize:vertical;line-height:1.5}
+  .row{display:flex;gap:10px}
+  .row>div{flex:1}
+
+  /* CDN single-select list */
+  .sec-title{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:4px 0 8px}
+  .cdns{display:flex;flex-direction:column;gap:8px}
+  .pick{display:flex;align-items:center;justify-content:space-between;gap:8px;background:rgba(10,9,28,.55);
+    border:1px solid var(--border);border-radius:10px;padding:11px 14px;cursor:pointer;user-select:none;
+    font-size:14px;font-weight:600;transition:border-color .15s,background .15s,box-shadow .15s,transform .12s}
+  .pick:hover{border-color:var(--border-hi);transform:translateX(2px)}
+  .pick.on{border-color:var(--purple);background:rgba(124,108,255,.18);color:#fff;box-shadow:0 0 16px rgba(124,108,255,.28)}
+  .pick .badge{font-size:10px;font-weight:500;color:var(--muted)}
+  .pick .right{display:flex;align-items:center;gap:8px}
+  .pick .edit{opacity:.45;font-size:13px;padding:2px 4px;border-radius:4px;cursor:pointer}
+  .pick .edit:hover{opacity:1;background:rgba(255,255,255,.08)}
+  .pick.custom{border-style:dashed}
+  .pick.custom .badge{color:var(--warn)}
+  .addcustom{margin-top:12px;border:2px dashed var(--border-hi);color:#cdb3ff;background:rgba(124,108,255,.07);
+    border-radius:10px;padding:12px;cursor:pointer;text-align:center;font-weight:700;font-size:14px;transition:all .15s}
+  .addcustom:hover{background:rgba(168,85,247,.16);border-color:var(--purple);box-shadow:0 0 14px rgba(168,85,247,.25)}
+
+  details.adv{margin-top:18px}
+  details.adv summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:9px;
+    padding:11px 14px;border-radius:11px;border:1px solid var(--border-hi);background:rgba(124,108,255,.08);
+    color:#d6d0ff;font-size:13px;font-weight:700;transition:background .15s,box-shadow .15s,border-color .15s}
+  details.adv summary:hover{background:rgba(124,108,255,.18);box-shadow:0 0 14px rgba(124,108,255,.22)}
+  details.adv summary::-webkit-details-marker{display:none}
+  details.adv .adv-ico{display:inline-block;color:var(--purple);font-size:11px;transition:transform .2s}
+  details.adv[open] .adv-ico{transform:rotate(90deg)}
+  details.adv summary .gear{font-size:14px}
+  .adv-body{display:flex;flex-direction:column;gap:13px;margin-top:12px;animation:fadeUp .3s ease both}
+  .adv-group{background:rgba(10,9,28,.42);border:1px solid var(--border);border-radius:13px;padding:11px 13px 14px}
+  .adv-group .gh{display:flex;align-items:center;gap:7px;font-size:10px;text-transform:uppercase;letter-spacing:.09em;
+    color:var(--purple);font-weight:800;padding-bottom:4px;border-bottom:1px solid var(--border);margin-bottom:4px}
+  .adv-group .gh .gh-ico{font-size:12px;filter:saturate(1.3)}
+  .adv .row{flex-wrap:wrap;gap:8px}
+  .adv .row>div{flex:1 1 calc(50% - 4px);min-width:0}
+  /* toggle switch (replaces plain checkboxes) */
+  .switch{display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:12px;font-size:13px;color:var(--fg);user-select:none}
+  .switch input{display:none}
+  .switch .track{flex:none;width:38px;height:21px;border-radius:999px;background:rgba(124,108,255,.16);
+    border:1px solid var(--border-hi);position:relative;transition:background .2s,box-shadow .2s}
+  .switch .track::after{content:'';position:absolute;top:2px;left:2px;width:15px;height:15px;border-radius:50%;
+    background:#cfc7ff;transition:transform .2s,background .2s}
+  .switch input:checked+.track{background:var(--grad);box-shadow:0 0 12px rgba(168,85,247,.4)}
+  .switch input:checked+.track::after{transform:translateX(17px);background:#fff}
+  button.go{margin-top:18px;width:100%;background:var(--grad);background-size:200% 200%;border:0;color:#fff;font-weight:700;
+    padding:13px;border-radius:11px;cursor:pointer;font-size:14px;letter-spacing:.02em;
+    box-shadow:0 6px 22px rgba(124,108,255,.38);transition:transform .15s,box-shadow .2s,background-position .5s}
+  button.go:hover{transform:translateY(-2px);box-shadow:0 11px 30px rgba(168,85,247,.5);background-position:100% 50%}
+  button.go:active{transform:translateY(0)}
+  button.go:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
+  button.go.stop{background:linear-gradient(135deg,#ff5d7a,#c026d3)}
+  .hint{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.4}
+
+  /* right side */
+  .panel.right{display:flex;flex-direction:column;gap:16px}
+  .rrow{display:flex;gap:16px;flex-wrap:wrap}
+  .rrow>.card{flex:1 1 240px;min-width:240px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:14px;overflow:hidden;display:flex;flex-direction:column;
+    backdrop-filter:blur(9px);box-shadow:0 8px 30px rgba(5,3,20,.35);animation:fadeUp .5s ease both;transition:border-color .2s,box-shadow .2s}
+  .card:hover{border-color:var(--border-hi)}
+  .rrow:nth-child(2) .card{animation-delay:.06s}
+  .rrow:nth-child(3) .card{animation-delay:.12s}
+  .card h3{margin:0;padding:10px 14px;font-size:13px;border-bottom:1px solid var(--border);
+    display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .card h3 .count{color:var(--muted);font-weight:500;font-size:12px}
+
+  /* live log — DO NOT change these rules */
+  #log{font-family:var(--mono);font-size:12px;line-height:1.5;padding:12px 14px;white-space:pre-wrap;
+    height:240px;overflow:auto;color:#c9d1d9}
+  #log .l-ok{color:var(--ok)} #log .l-err{color:var(--err)} #log .l-sys{color:var(--accent)}
+
+  .scrollbox{font-family:var(--mono);font-size:12px;line-height:1.6;padding:12px 14px;white-space:pre-wrap;
+    word-break:break-all;overflow:auto;color:#c9d1d9}
+  .ranges-box{height:240px}
+  .ips-box{height:103px}
+  .config-box{min-height:160px}
+  .sub{padding:8px 14px 0;font-size:11px;color:var(--muted);display:flex;justify-content:space-between;align-items:center}
+  .copy{background:rgba(124,108,255,.08);border:1px solid var(--border);color:#c9c1f0;cursor:pointer;
+    padding:4px 11px;font-size:11px;border-radius:999px;transition:all .15s}
+  .copy:hover{border-color:var(--purple);color:#fff;background:rgba(124,108,255,.2)}
+  .empty{color:var(--muted);padding:18px 14px;font-size:12px}
+  .pbar{height:14px;background:rgba(10,9,28,.7);border-radius:999px;margin:14px;overflow:hidden;border:1px solid var(--border)}
+  #pfill{height:100%;width:0;background:linear-gradient(90deg,var(--blue),var(--purple),var(--pink),var(--blue));
+    background-size:200% 100%;animation:flow 2.5s linear infinite;transition:width .25s ease;box-shadow:0 0 14px rgba(168,85,247,.55)}
+  #ptext{font-family:var(--mono);font-size:11px;font-weight:400}
+
+  /* custom range modal */
+  .overlay{position:fixed;inset:0;background:rgba(5,3,20,.62);backdrop-filter:blur(4px);display:none;align-items:center;justify-content:center;z-index:10}
+  .overlay.show{display:flex}
+  .modal{background:var(--panel-solid);border:1px solid var(--border-hi);border-radius:16px;width:480px;max-width:92vw;padding:24px;
+    box-shadow:0 20px 60px rgba(0,0,0,.5);animation:fadeUp .25s ease both}
+  .modal h2{margin:0 0 4px;font-size:16px}
+  .modal .mhint{color:var(--muted);font-size:12px;margin-bottom:6px}
+  .modal .mbtns{display:flex;gap:10px;margin-top:18px;justify-content:flex-end}
+  .modal button{padding:9px 18px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:700;border:1px solid var(--border);transition:transform .15s,box-shadow .2s}
+  .modal .save{background:var(--grad);border:0;color:#fff;box-shadow:0 4px 14px rgba(168,85,247,.4)}
+  .modal .save:hover{transform:translateY(-1px);box-shadow:0 7px 18px rgba(168,85,247,.5)}
+  .modal .cancel{background:transparent;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <img class="logo" src="/static/logo.png" alt="RainScanner logo" />
+  <div class="brand">
+    <!-- keep version in sync with the `version` const in cmd/cdnscan/main.go -->
+    <h1>RainScanner <span class="ver">v1.0.0</span></h1>
+    <span class="tag">unified CDN clean-IP scanner · real Xray latency</span>
+  </div>
+  <div class="xupd">
+    <a class="gh" href="https://github.com/IzumiRain/RainScanner" target="_blank" rel="noopener" title="View source on GitHub">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      GitHub
+    </a>
+    <button id="xrayCheck">Check for xray updates</button>
+    <button id="xrayUpdate" style="display:none">⬇ Update now</button>
+    <span id="xrayVerMsg"></span>
+  </div>
+</header>
+
+<div class="wrap">
+  <!-- ───────── left: target + settings ───────── -->
+  <div class="panel left">
+    <div class="sec-title">Target (pick one)</div>
+    <div class="cdns" id="cdns"></div>
+    <div class="addcustom" id="addcustom">Add custom +</div>
+
+    <details class="adv">
+      <summary><span class="adv-ico">▸</span><span class="gear">⚙</span> Advanced settings</summary>
+      <div class="adv-body">
+
+        <div class="adv-group">
+          <div class="gh"><span class="gh-ico">🌐</span> Network</div>
+          <label>Ports to scan (comma-separated)</label>
+          <input type="text" id="ports" value="443" placeholder="443,80,8080,2053,2096" />
+          <div class="hint">Each candidate IP is TCP-tested on every port. Default: 443.</div>
+          <label>Xray binary path</label>
+          <input type="text" id="xray" placeholder="auto (PATH)" />
+        </div>
+
+        <div class="adv-group">
+          <div class="gh"><span class="gh-ico">⚡</span> Performance</div>
+          <label class="switch"><input type="checkbox" id="lite" /><span class="track"></span>Lite mode (low-power — caps load on weak PCs)</label>
+          <div class="hint">Lite hard-caps concurrency (2 xray / 100 TCP). Leave concurrency blank for auto (scaled to your CPU).</div>
+          <div class="row">
+            <div><label>TCP concurrency</label><input type="number" id="tcpc" placeholder="auto" /></div>
+            <div><label>Xray procs</label><input type="number" id="xrayc" placeholder="auto" /></div>
+            <div><label>Batch size</label><input type="number" id="batch" placeholder="auto" /></div>
+          </div>
+          <div class="hint">Xray procs = simultaneous xray processes; batch size = IPs tested per process. Blank = auto (≈2 procs × 50).</div>
+        </div>
+
+        <div class="adv-group">
+          <div class="gh"><span class="gh-ico">🎯</span> Stage 2 · Xray confirm</div>
+          <div class="row">
+            <div><label>Probes</label><input type="number" id="probes" value="5" /></div>
+            <div><label>Confirm</label><input type="number" id="confirm" value="3" /></div>
+            <div><label>Max latency (ms)</label><input type="number" id="maxlat" value="800" /></div>
+            <div><label>Probe timeout (ms)</label><input type="number" id="probeto" placeholder="auto" /></div>
+          </div>
+          <div class="hint">Probe timeout blank = auto (2× max latency, min 1.5s). Lower it to skip dead IPs faster.</div>
+        </div>
+
+        <div class="adv-group">
+          <div class="gh"><span class="gh-ico">🎲</span> Sampling</div>
+          <label>Random sample (max IPs to scan, 0 = all)</label>
+          <input type="number" id="maxtotal" value="0" placeholder="0 = scan all" />
+          <div class="hint">Randomly picks N IPs out of the whole pool — e.g. 20000 of Cloudflare's ~1.5M. 0 scans everything.</div>
+          <div class="row">
+            <div><label>Sample per /24</label><input type="number" id="sample" value="0" /></div>
+            <div><label>Max hosts/CIDR</label><input type="number" id="maxhost" value="0" /></div>
+          </div>
+          <div class="hint">Per-/24 / per-CIDR caps for finer control (0 = full enumeration).</div>
+          <label class="switch"><input type="checkbox" id="refresh" /><span class="track"></span>Force re-fetch provider ranges</label>
+        </div>
+
+      </div>
+    </details>
+
+    <button class="go" id="go">Start scan</button>
+  </div>
+
+  <!-- ───────── right: progress + results ───────── -->
+  <div class="panel right">
+    <div class="card">
+      <h3>Progress <span id="ptext" class="tag"></span></h3>
+      <div class="pbar"><div id="pfill"></div></div>
+    </div>
+
+    <div class="rrow">
+      <div class="card" style="flex:1 1 220px">
+        <h3>Selected Ranges <span class="count" id="rangesCount"></span></h3>
+        <div id="ranges" class="scrollbox ranges-box"><div class="empty">Pick a target to preview its ranges.</div></div>
+      </div>
+
+      <div class="card" style="flex:2 1 320px">
+        <h3>Live log <span id="status" class="tag"></span></h3>
+        <div id="log"></div>
+      </div>
+
+      <div class="card" style="flex:1.4 1 260px">
+        <h3>Valid IPs</h3>
+        <div class="sub"><span>TCP-reachable <span id="tcpCount"></span></span>
+          <button class="copy" id="copyTcp">copy IPs</button></div>
+        <div id="tcpips" class="scrollbox ips-box"><div class="empty">No scan yet.</div></div>
+        <div class="sub" id="xraySub" style="display:none"><span>Xray real-delay <span id="xrayCount"></span></span>
+          <button class="copy" id="copyXray">copy IPs</button></div>
+        <div id="xrayips" class="scrollbox ips-box" style="display:none"></div>
+      </div>
+    </div>
+
+    <div class="rrow">
+      <div class="card" style="flex:1 1 260px">
+        <h3>Optional config <span class="count">one link</span></h3>
+        <div style="padding:12px 14px">
+          <input type="text" id="link" placeholder="vless://uuid@host:443?...  (empty = TCP-only mode)" />
+          <div class="hint">Paste a single share link. Leave empty for TCP-only. If provided, survivors are
+            Xray delay-tested and confirmed clean IPs are substituted into this one config.</div>
+        </div>
+      </div>
+
+      <div class="card" style="flex:2 1 320px">
+        <h3>Output configs (clean IP inside)
+          <button class="copy" id="copyConfigs" style="display:none">copy all</button></h3>
+        <div id="configs" class="scrollbox config-box"><div class="empty">Provide an optional config to get ready-to-use links here.</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- target editor modal -->
+<div class="overlay" id="overlay">
+  <div class="modal">
+    <h2 id="mTitle">Add custom range</h2>
+    <div class="mhint">Name it, paste one CIDR (or bare IP) per line, and optionally give an API URL to reload ranges from.</div>
+    <label>name</label>
+    <input type="text" id="cName" placeholder="example name" />
+    <label>api url (optional)</label>
+    <div class="row" style="align-items:stretch">
+      <div style="flex:1"><input type="text" id="cUrl" placeholder="https://provider/ips.txt  (leave blank for manual ranges)" /></div>
+      <button class="copy" id="cReload" style="white-space:nowrap;padding:0 12px">⟳ Reload range IPs</button>
+    </div>
+    <div class="hint" id="cReloadMsg"></div>
+    <label>ip ranges <span id="cRangeCount" class="badge" style="color:var(--muted)"></span></label>
+    <textarea id="cRanges" rows="7" placeholder="1.2.3.0/24&#10;4.5.6.7/32&#10;7.8.9.0/16"></textarea>
+    <div class="mbtns">
+      <button class="cancel" id="cDelete" style="margin-right:auto;color:var(--err);border-color:var(--err);display:none">Delete</button>
+      <button class="cancel" id="cCancel">Cancel</button>
+      <button class="save" id="cSave">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let targets = [];         // server records: {name, cidrs, api_url, builtin}
+let target = null;        // currently selected record
+let editingName = null;   // name being edited in the modal (null = new custom)
+let es = null;
+let scanStart = 0, stageKey = '', stageStart = 0;
+
+function updateProgress(p){
+  const key = p.cdn + '/' + p.stage;
+  if(key !== stageKey){ stageKey = key; stageStart = Date.now(); }
+  const pct = p.total ? Math.round(p.done * 100 / p.total) : 0;
+  $('pfill').style.width = pct + '%';
+  const elapsed = ((Date.now() - scanStart) / 1000).toFixed(0);
+  const se = (Date.now() - stageStart) / 1000;
+  const eta = p.done ? (se / p.done * (p.total - p.done)).toFixed(0) : '…';
+  const name = p.stage === 'tcp' ? 'TCP scan' : 'Xray latency';
+  $('ptext').textContent = `${p.cdn} · ${name} ${p.done}/${p.total} (${pct}%) · elapsed ${elapsed}s · ETA ${eta}s`;
+}
+
+// ── target selection ──
+function esc(s){ return String(s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderTargets(){
+  const box = $('cdns'); box.innerHTML='';
+  targets.forEach(t=>box.appendChild(pickEl(t)));
+  highlight();
+}
+function pickEl(t){
+  const el=document.createElement('div');
+  el.className='pick'+(t.builtin?'':' custom');
+  el.dataset.name = t.name;
+  const n = (t.cidrs||[]).length;
+  const badge = `${n} range(s)`;
+  el.innerHTML = `<span>${esc(t.name)}</span>`+
+    `<span class="right"><span class="badge">${badge}</span><span class="edit" title="edit">✎</span></span>`;
+  el.querySelector('span').onclick = ()=>selectTarget(t);
+  el.onclick = e=>{ if(!e.target.classList.contains('edit')) selectTarget(t); };
+  el.querySelector('.edit').onclick = e=>{ e.stopPropagation(); openEdit(t.name); };
+  return el;
+}
+function selectTarget(t){
+  target = t;
+  highlight();
+  showRanges(t.cidrs);
+}
+function highlight(){
+  document.querySelectorAll('.pick').forEach(el=>{
+    el.classList.toggle('on', target && el.dataset.name === target.name);
+  });
+}
+
+async function loadTargets(keepSelection){
+  const prev = target && target.name;
+  targets = await (await fetch('/api/targets')).json() || [];
+  renderTargets();
+  if(!targets.length){ target=null; return; }
+  let pick = null;
+  if(keepSelection && prev) pick = targets.find(t=>t.name===prev);
+  if(!pick) pick = targets.find(t=>t.name==='cloudflare') || targets[0];
+  selectTarget(pick);
+}
+function showRanges(cidrs){
+  cidrs = cidrs||[];
+  $('rangesCount').textContent = cidrs.length ? cidrs.length+' CIDR' : '';
+  $('ranges').textContent = cidrs.length ? cidrs.join('\n') : '';
+  if(!cidrs.length) $('ranges').innerHTML='<div class="empty">no ranges</div>';
+}
+
+// ── log (style preserved) ──
+function logLine(text, cls){
+  const el=$('log'); const span=document.createElement('div');
+  if(cls) span.className=cls; span.textContent=text;
+  el.appendChild(span); el.scrollTop=el.scrollHeight;
+}
+
+// ── results ──
+function fillBox(boxId, lines, emptyMsg){
+  if(lines && lines.length){ $(boxId).textContent = lines.join('\n'); }
+  else { $(boxId).innerHTML = '<div class="empty">'+emptyMsg+'</div>'; }
+}
+function renderResult(d){
+  fillBox('tcpips', d.tcp_ips, 'No TCP-reachable IPs.');
+  $('tcpCount').textContent = '('+(d.tcp_ips?d.tcp_ips.length:0)+')';
+
+  const hasXray = d.configs && d.configs.length || d.confirmed_ips && d.confirmed_ips.length;
+  $('xraySub').style.display = hasXray ? 'flex' : 'none';
+  $('xrayips').style.display = hasXray ? 'block' : 'none';
+  if(hasXray){
+    fillBox('xrayips', d.confirmed_ips, 'None passed Xray.');
+    $('xrayCount').textContent = '('+(d.confirmed_ips?d.confirmed_ips.length:0)+')';
+  }
+
+  if(d.configs && d.configs.length){
+    $('configs').textContent = d.configs.join('\n');
+    $('copyConfigs').style.display='inline-block';
+  }else{
+    $('configs').innerHTML='<div class="empty">Provide an example config to get ready-to-use links here.</div>';
+    $('copyConfigs').style.display='none';
+  }
+}
+
+function setRunning(on){
+  $('go').textContent = on?'Stop':'Start scan';
+  $('go').className = on?'go stop':'go';
+  $('status').textContent = on?'running…':'idle';
+}
+
+function parsePorts(){
+  return $('ports').value.split(',').map(s=>parseInt(s.trim(),10)).filter(n=>n>0&&n<=65535);
+}
+
+async function start(){
+  if(es){ es.close(); es=null; fetch('/api/stop',{method:'POST'}).catch(()=>{}); setRunning(false); $('status').textContent='stopped'; return; }
+  if(!target){ alert('Pick a CDN or add a custom range'); return; }
+  const ports = parsePorts();
+  if(!ports.length){ alert('Enter at least one valid port'); return; }
+
+  $('log').innerHTML=''; setRunning(true);
+  $('tcpips').innerHTML='<div class="empty">scanning…</div>'; $('tcpCount').textContent='';
+  $('xraySub').style.display='none'; $('xrayips').style.display='none';
+  $('configs').innerHTML='<div class="empty">scanning…</div>'; $('copyConfigs').style.display='none';
+  scanStart=Date.now(); stageKey=''; $('pfill').style.width='0%'; $('ptext').textContent='starting…';
+
+  const body={
+    link:$('link').value.trim(), xray_path:$('xray').value.trim(),
+    ports, port:ports[0],
+    tcp_concurrency:+$('tcpc').value||0, xray_concurrency:+$('xrayc').value||0, batch_size:+$('batch').value||0, lite:$('lite').checked,
+    probes:+$('probes').value, confirm:+$('confirm').value, max_latency_ms:+$('maxlat').value,
+    probe_timeout_ms:+$('probeto').value||0,
+    sample_per_24:+$('sample').value, max_hosts_per_cidr:+$('maxhost').value,
+    max_total:+$('maxtotal').value||0, refresh:$('refresh').checked
+  };
+  // Every target now lives in the persistent store; the server resolves CIDRs
+  // by name (custom or built-in), so we always scan by name.
+  body.cdn=target.name;
+
+  let id;
+  try{
+    const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!res.ok){ logLine('error: '+await res.text(),'l-err'); setRunning(false); return; }
+    id=(await res.json()).id;
+  }catch(e){ logLine('request failed: '+e,'l-err'); setRunning(false); return; }
+
+  es=new EventSource('/api/stream?id='+id);
+  es.onmessage=ev=>{
+    const m=JSON.parse(ev.data);
+    if(m.type==='log'){ logLine(m.line, /\+ /.test(m.line)?'l-ok':null); }
+    else if(m.type==='progress'){ updateProgress(m.data); }
+    else if(m.type==='error'){ logLine('ERROR: '+m.line,'l-err'); }
+    else if(m.type==='result'){ renderResult(m.data||{}); }
+    else if(m.type==='done'){ es.close(); es=null; setRunning(false); $('status').textContent='done';
+      $('pfill').style.width='100%'; const t=((Date.now()-scanStart)/1000).toFixed(1); $('ptext').textContent=`done in ${t}s`; logLine('— finished —','l-sys'); }
+  };
+  es.onerror=()=>{ logLine('stream closed','l-sys'); if(es){es.close();es=null;} setRunning(false); };
+}
+
+// ── target editor modal ──
+function countRanges(){
+  const n=$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean).length;
+  $('cRangeCount').textContent = n? '('+n+')' : '';
+}
+function openModal(){ $('cReloadMsg').textContent=''; $('overlay').classList.add('show'); countRanges(); $('cName').focus(); }
+function closeModal(){ $('overlay').classList.remove('show'); }
+
+// New custom target.
+function openNew(){
+  editingName=null;
+  $('mTitle').textContent='Add custom range';
+  $('cName').value=''; $('cName').disabled=false;
+  $('cUrl').value=''; $('cRanges').value='';
+  $('cDelete').style.display='none';
+  openModal();
+}
+// Edit an existing target (built-in or custom).
+function openEdit(name){
+  const t=targets.find(x=>x.name===name); if(!t) return;
+  editingName=name;
+  $('mTitle').textContent=(t.builtin?'Edit CDN — ':'Edit custom — ')+name;
+  $('cName').value=t.name; $('cName').disabled=!!t.builtin; // don't rename built-ins
+  $('cUrl').value=t.api_url||'';
+  $('cRanges').value=(t.cidrs||[]).join('\n');
+  $('cDelete').style.display='inline-block';
+  openModal();
+}
+
+async function saveCustom(){
+  const name=$('cName').value.trim()|| (editingName||'custom');
+  const cidrs=$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const api_url=$('cUrl').value.trim();
+  if(!cidrs.length && !api_url){ alert('Enter at least one CIDR/IP, or an API URL to reload from'); return; }
+  try{
+    const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name, cidrs, api_url})});
+    if(!r.ok){ alert('save failed: '+await r.text()); return; }
+    const saved=await r.json();
+    closeModal();
+    target={name:saved.name};      // keep selection on the saved target
+    await loadTargets(true);
+  }catch(e){ alert('save failed: '+e); }
+}
+
+async function deleteTarget(){
+  if(!editingName) return;
+  if(!confirm('Delete "'+editingName+'"?')) return;
+  try{
+    const r=await fetch('/api/targets?name='+encodeURIComponent(editingName),{method:'DELETE'});
+    if(!r.ok){ alert('delete failed: '+await r.text()); return; }
+    closeModal();
+    target=null;
+    await loadTargets(false);
+  }catch(e){ alert('delete failed: '+e); }
+}
+
+// Reload ranges from the API URL into the textarea (not persisted until Save).
+async function reloadRanges(){
+  const name=$('cName').value.trim();
+  const url=$('cUrl').value.trim();
+  if(!name){ $('cReloadMsg').textContent='give it a name first (reload saves it, then fetches)'; return; }
+  if(!url){ $('cReloadMsg').textContent='enter an API URL to reload from'; return; }
+  $('cReloadMsg').textContent='reloading…'; $('cReload').disabled=true;
+  try{
+    // Persist current name+url first so the server reloads from the right source,
+    // then ask it to refresh; the response carries the fresh CIDRs.
+    if(name){
+      await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({name, cidrs:$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean), api_url:url})});
+    }
+    const r=await fetch('/api/targets/reload',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name})});
+    if(!r.ok){ $('cReloadMsg').textContent='reload failed: '+await r.text(); return; }
+    const rec=await r.json();
+    $('cRanges').value=(rec.cidrs||[]).join('\n'); countRanges();
+    $('cReloadMsg').textContent='loaded '+(rec.cidrs?rec.cidrs.length:0)+' ranges';
+    loadTargets(true);
+  }catch(e){ $('cReloadMsg').textContent='reload failed: '+e; }
+  finally{ $('cReload').disabled=false; }
+}
+
+// ── xray update ──
+async function checkXray(){
+  $('xrayVerMsg').textContent='checking…'; $('xrayCheck').disabled=true; $('xrayUpdate').style.display='none';
+  try{
+    const path=$('xray').value.trim();
+    const r=await fetch('/api/xray/version'+(path?('?path='+encodeURIComponent(path)):''));
+    const d=await r.json();
+    if(!d.supported){ $('xrayVerMsg').textContent='no xray-core build for this OS/arch'; return; }
+    const cur=d.current||'(not installed)';
+    if(d.error){ $('xrayVerMsg').textContent='installed '+cur+' · check failed: '+d.error; return; }
+    if(d.update_available){
+      $('xrayVerMsg').textContent='installed '+cur+' → latest '+d.latest+' available';
+      $('xrayUpdate').style.display='';
+    } else {
+      $('xrayVerMsg').textContent='installed '+cur+' · up to date (latest '+d.latest+')';
+    }
+  }catch(e){ $('xrayVerMsg').textContent='check failed: '+e; }
+  finally{ $('xrayCheck').disabled=false; }
+}
+async function updateXray(){
+  $('xrayVerMsg').textContent='downloading & installing… (this can take a minute)';
+  $('xrayUpdate').disabled=true; $('xrayCheck').disabled=true;
+  try{
+    const path=$('xray').value.trim();
+    const r=await fetch('/api/xray/update',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({path})});
+    if(!r.ok){ $('xrayVerMsg').textContent='update failed: '+await r.text(); return; }
+    const d=await r.json();
+    $('xrayVerMsg').textContent='updated to '+d.version+' ✓';
+    $('xrayUpdate').style.display='none';
+  }catch(e){ $('xrayVerMsg').textContent='update failed: '+e; }
+  finally{ $('xrayUpdate').disabled=false; $('xrayCheck').disabled=false; }
+}
+// Mirror the (possibly truncated) status text into the title attribute so the
+// full message is always readable on hover.
+(()=>{const e=$('xrayVerMsg');new MutationObserver(()=>{e.title=e.textContent;}).observe(e,{childList:true,characterData:true,subtree:true});})();
+$('xrayCheck').onclick=checkXray;
+$('xrayUpdate').onclick=updateXray;
+
+// ── copy helpers ──
+function copyText(text, btn, ok='copied!'){
+  navigator.clipboard.writeText(text);
+  const old=btn.textContent; btn.textContent=ok; setTimeout(()=>btn.textContent=old,1200);
+}
+$('copyTcp').onclick=()=>copyText($('tcpips').textContent, $('copyTcp'));
+$('copyXray').onclick=()=>copyText($('xrayips').textContent, $('copyXray'));
+$('copyConfigs').onclick=()=>copyText($('configs').textContent, $('copyConfigs'));
+
+$('go').onclick=start;
+$('addcustom').onclick=openNew;
+$('cCancel').onclick=closeModal;
+$('cSave').onclick=saveCustom;
+$('cDelete').onclick=deleteTarget;
+$('cReload').onclick=reloadRanges;
+$('cRanges').oninput=countRanges;
+$('overlay').onclick=e=>{ if(e.target===$('overlay')) closeModal(); };
+
+// Lite mode owns concurrency: dim the manual fields so it's clear they're ignored.
+function syncLite(){
+  const on=$('lite').checked;
+  ['tcpc','xrayc','batch'].forEach(id=>{ $(id).disabled=on; $(id).style.opacity=on?.45:1; });
+}
+$('lite').onchange=syncLite; syncLite();
+
+loadTargets(false);
+</script>
+</body>
+</html>
