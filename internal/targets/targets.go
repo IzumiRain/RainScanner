@@ -41,24 +41,25 @@ type Record struct {
 // source of truth during a run; mutations are flushed through the storage.Store
 // (built-in range edits to ips/<name>.json, custom edits to ips/custom.json).
 type Registry struct {
-	store storage.Store
+	store        storage.Store
+	builtinNames map[string]bool // names seeded from the active manifest
 
 	mu   sync.Mutex
 	recs []Record
 }
 
-// Open builds a Registry: built-in CDNs come from the provider registry (with
-// cached ranges filled in from the store), then user customs are loaded from the
-// store. Ready for concurrent use.
+// Open builds a Registry: built-in CDNs seeded from the active manifest (with
+// cached ranges from the store), then user customs loaded from the store.
 func Open(store storage.Store) (*Registry, error) {
-	r := &Registry{store: store}
+	r := &Registry{store: store, builtinNames: map[string]bool{}}
 
-	for _, name := range providers.Names() {
-		rec := Record{Name: name, Builtin: true, APIURL: providers.APIURL(name)}
-		if rf, err := store.Ranges(name); err == nil {
+	for _, entry := range providers.Entries() {
+		rec := Record{Name: entry.Name, Builtin: true, APIURL: entry.APIURL}
+		if rf, err := store.Ranges(entry.Name); err == nil {
 			rec.CIDRs = rf.CIDRs
 		}
 		r.recs = append(r.recs, rec)
+		r.builtinNames[strings.ToLower(entry.Name)] = true
 	}
 
 	customs, err := store.LoadCustoms()
@@ -114,12 +115,16 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	_, isBuiltin := providers.Get(rec.Name)
+	isBuiltin := r.builtinNames[strings.ToLower(rec.Name)]
 	rec.Builtin = isBuiltin
 
 	if i := r.indexOf(rec.Name); i >= 0 {
 		// Preserve the canonical name's existing casing/flag for built-ins.
 		rec.Builtin = r.recs[i].Builtin || isBuiltin
+		// Preserve the existing APIURL if the caller didn't supply one.
+		if rec.APIURL == "" {
+			rec.APIURL = r.recs[i].APIURL
+		}
 		r.recs[i] = rec
 	} else {
 		r.recs = append(r.recs, rec)
@@ -153,11 +158,10 @@ func (r *Registry) Delete(name string) (bool, error) {
 }
 
 // Reload re-fetches a target's CIDRs from its upstream feed and persists them.
-// An unmodified built-in feed uses that provider's precise, format-aware parser;
-// everything else (a custom target, or a built-in whose API URL the user has
-// overridden) falls back to the generic IPv4-CIDR scraper. The refreshed record
-// is returned.
-func (r *Registry) Reload(ctx context.Context, c *http.Client, name string) (Record, error) {
+// For built-in CDNs with the original API URL, FetchRanges is used (official→backup
+// per opts). Built-ins with a user-overridden API URL, and all customs, are scraped
+// via ScrapeCIDRs. The refreshed record is returned.
+func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts providers.FetchOptions) (Record, error) {
 	rec, ok := r.Get(name)
 	if !ok {
 		return Record{}, fmt.Errorf("unknown target %q", name)
@@ -165,13 +169,15 @@ func (r *Registry) Reload(ctx context.Context, c *http.Client, name string) (Rec
 
 	var cidrs []string
 	var err error
-	if p, isBuiltin := providers.Get(name); isBuiltin && rec.APIURL == p.APIURL && p.APIURL != "" {
-		// Unmodified built-in feed: use its precise parser.
-		cidrs, err = p.Fetch(ctx, c)
+
+	if entry, isBuiltin := providers.GetEntry(name); isBuiltin && rec.APIURL == entry.APIURL {
+		// Unmodified built-in feed: use full FetchRanges (official→backup per opts).
+		cidrs, _, err = providers.FetchRanges(ctx, c, entry, opts)
 		if err == nil {
 			cidrs = iprange.FilterV4(cidrs)
 		}
 	} else {
+		// Custom target or user-overridden API URL: generic scrape.
 		if strings.TrimSpace(rec.APIURL) == "" {
 			return Record{}, fmt.Errorf("%s has no API URL to reload from", name)
 		}
