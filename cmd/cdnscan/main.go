@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -18,13 +17,11 @@ import (
 	"sync"
 	"time"
 
-	"cdnscan/internal/iprange"
-	"cdnscan/internal/link"
+	"cdnscan/internal/app"
 	"cdnscan/internal/pipeline"
 	"cdnscan/internal/providers"
-	"cdnscan/internal/scan"
+	"cdnscan/internal/storage"
 	"cdnscan/internal/web"
-	"cdnscan/internal/xray"
 )
 
 // version is the released product version, surfaced via the -version flag and
@@ -39,7 +36,7 @@ func main() {
 		port        = flag.Int("port", 443, "target TCP port")
 		portsStr    = flag.String("ports", "", "comma-separated ports to scan (overrides -port; e.g. 443,80,8080)")
 		tcpConc     = flag.Int("tcp-concurrency", 0, "stage1 max concurrent TCP dials (0 = auto: scaled to CPU)")
-		tcpTimeout  = flag.Duration("tcp-timeout", 3*time.Second, "stage1 per-connection timeout")
+		_           = flag.Duration("tcp-timeout", 3*time.Second, "stage1 per-connection timeout")
 		xrayConc    = flag.Int("xray-concurrency", 0, "stage2 max concurrent xray processes (0 = auto)")
 		batchSize   = flag.Int("batch-size", 0, "stage2 candidates tested per xray process (0 = auto: 50)")
 		lite        = flag.Bool("lite", false, "low-power mode: hard-cap concurrency for weak machines")
@@ -81,7 +78,12 @@ func main() {
 			runtime.GOMAXPROCS(n)
 		}
 		url := guiURL(*addr)
-		srv := web.NewServer(*ipsDir, *resultsDir)
+		store := storage.NewFileStore(*ipsDir, *resultsDir)
+		svc, serr := app.New(store, *ipsDir, *resultsDir)
+		if serr != nil {
+			log.Fatalf("init service: %v", serr)
+		}
+		srv := web.NewServer(svc)
 		ln, err := srv.Bind(*addr)
 		if err != nil {
 			// Port already held — almost certainly another RainScanner instance.
@@ -121,36 +123,6 @@ func main() {
 		log.Fatal("no valid CDN names matched")
 	}
 
-	httpClient := &http.Client{Timeout: 20 * time.Second}
-
-	// Stage 2 is enabled only when a share link is provided.
-	var prober *xray.Prober
-	if *linkStr != "" {
-		ob, err := link.Parse(*linkStr)
-		if err != nil {
-			log.Fatalf("parse link: %v", err)
-		}
-		bin, err := xray.Resolve(*xrayPath)
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-		prober, err = xray.NewProber(xray.ProberOptions{
-			XrayPath:     bin,
-			Outbound:     ob,
-			ProbeURL:     *probeURL,
-			Probes:       *probes,
-			Confirm:      *confirm,
-			MaxLatency:   *maxLatency,
-			ProbeTimeout: *probeTO,
-		})
-		if err != nil {
-			log.Fatalf("prober: %v", err)
-		}
-		log.Printf("xray: %s | protocol=%s net=%s sec=%s sni=%s", bin, ob.Protocol, ob.Network, ob.Security, ob.SNI)
-	} else {
-		log.Print("no -link provided: running TCP-only (stage1) mode, no latency confirmation")
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -168,29 +140,48 @@ func main() {
 		lowerProcessPriority() // keep the box usable during a CLI scan
 	}
 
-	sb := newStatusBar()
-	cfg := pipeline.Config{
-		CDNs:         cdns,
-		Ports:        ports,
-		IPsDir:       *ipsDir,
-		ResultsDir:   *resultsDir,
-		ForceRefresh: *refresh,
-		Sample:       iprange.Strategy{SamplePer24: *samplePer24, MaxHostsPerCIDR: *maxPerCIDR, MaxTotal: *maxTotal},
-		TCP:          scan.Options{Port: *port, Concurrency: tcpConcN, Timeout: *tcpTimeout},
-		Prober:       prober,
-		XrayConcurrency: xrayConcN, // 0 => pipeline auto
-		BatchSize:       batchN,    // 0 => pipeline default (50)
-		CandidatePort:   *port,
-		HTTPClient:      httpClient,
-		Log:             sb.logf,
-		Progress:        sb.progress,
+	store := storage.NewFileStore(*ipsDir, *resultsDir)
+	svc, err := app.New(store, *ipsDir, *resultsDir)
+	if err != nil {
+		log.Fatalf("init service: %v", err)
 	}
 
-	summaries, err := pipeline.Run(ctx, cfg)
-	sb.finish()
-	if err != nil {
-		log.Fatalf("run: %v", err)
+	if *linkStr == "" {
+		log.Print("no -link provided: running TCP-only (stage1) mode, no latency confirmation")
 	}
+
+	sb := newStatusBar()
+	hooks := app.ScanHooks{Log: sb.logf, Progress: sb.progress}
+
+	var summaries []pipeline.Summary
+	for _, cdn := range cdns {
+		sums, err := svc.Scan(ctx, app.ScanRequest{
+			CDN:             cdn,
+			Ports:           ports,
+			Port:            *port,
+			Link:            *linkStr,
+			XrayPath:        *xrayPath,
+			TCPConcurrency:  tcpConcN,
+			XrayConcurrency: xrayConcN,
+			BatchSize:       batchN,
+			Probes:          *probes,
+			Confirm:         *confirm,
+			MaxLatencyMS:    int(maxLatency.Milliseconds()),
+			ProbeTimeoutMS:  int(probeTO.Milliseconds()),
+			ProbeURL:        *probeURL,
+			SamplePer24:     *samplePer24,
+			MaxHostsPerCIDR: *maxPerCIDR,
+			MaxTotal:        *maxTotal,
+			Lite:            *lite,
+			Refresh:         *refresh,
+		}, hooks)
+		if err != nil {
+			log.Printf("[%s] %v", cdn, err)
+			continue
+		}
+		summaries = append(summaries, sums...)
+	}
+	sb.finish()
 
 	fmt.Printf("\nTotal time: %.1fs\n", sb.elapsed().Seconds())
 	fmt.Println("=== Summary ===")
