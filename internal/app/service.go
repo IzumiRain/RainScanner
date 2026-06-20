@@ -7,6 +7,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"cdnscan/internal/link"
 	"cdnscan/internal/output"
 	"cdnscan/internal/pipeline"
+	"cdnscan/internal/providers"
 	"cdnscan/internal/scan"
 	"cdnscan/internal/storage"
 	"cdnscan/internal/targets"
@@ -30,7 +32,18 @@ type Service struct {
 
 // New opens the registry over the store and returns a ready Service. ipsDir and
 // resultsDir are retained for the scan engine's range cache + result writes.
+// New also loads and installs the CDN manifest so built-in names are available.
 func New(store storage.Store, ipsDir, resultsDir string) (*Service, error) {
+	// Load the CDN manifest (best-effort; uses local cache on network failure).
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	manifest, err := providers.LoadManifest(ctx, &http.Client{Timeout: 8 * time.Second}, ipsDir)
+	if err != nil {
+		log.Printf("warning: could not load CDN manifest (%v); defaults unavailable until network restored", err)
+		manifest = &providers.ManifestIndex{}
+	}
+	providers.SetManifest(manifest)
+
 	reg, err := targets.Open(store)
 	if err != nil {
 		return nil, err
@@ -51,8 +64,8 @@ func (s *Service) Upsert(rec targets.Record) (targets.Record, error) { return s.
 func (s *Service) Delete(name string) (bool, error) { return s.reg.Delete(name) }
 
 // Reload re-fetches a single target's ranges from its feed and persists them.
-func (s *Service) Reload(ctx context.Context, name string) (targets.Record, error) {
-	return s.reg.Reload(ctx, &http.Client{Timeout: 30 * time.Second}, name)
+func (s *Service) Reload(ctx context.Context, name string, opts providers.FetchOptions) (targets.Record, error) {
+	return s.reg.Reload(ctx, &http.Client{Timeout: 30 * time.Second}, name, opts)
 }
 
 // ReloadResult is one target's outcome in ReloadAll.
@@ -63,8 +76,8 @@ type ReloadResult struct {
 }
 
 // ReloadAll re-fetches every target that has an API URL. Always returns a
-// per-target summary (never a hard error) so one dead feed doesn't fail the rest.
-func (s *Service) ReloadAll(ctx context.Context) []ReloadResult {
+// per-target summary; one dead feed doesn't fail the rest.
+func (s *Service) ReloadAll(ctx context.Context, opts providers.FetchOptions) []ReloadResult {
 	client := &http.Client{Timeout: 30 * time.Second}
 	var out []ReloadResult
 	for _, rec := range s.reg.List() {
@@ -72,7 +85,7 @@ func (s *Service) ReloadAll(ctx context.Context) []ReloadResult {
 			continue
 		}
 		res := ReloadResult{Name: rec.Name}
-		if rr, err := s.reg.Reload(ctx, client, rec.Name); err != nil {
+		if rr, err := s.reg.Reload(ctx, client, rec.Name, opts); err != nil {
 			res.Error = err.Error()
 		} else {
 			res.Count = len(rr.CIDRs)
@@ -114,6 +127,8 @@ type ScanRequest struct {
 	MaxTotal        int
 	Lite            bool
 	Refresh         bool
+	PreferBackup    bool
+	NoBackup        bool
 }
 
 // ScanHooks carry live log/progress callbacks (nil-safe).
@@ -181,6 +196,8 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 		IPsDir:       s.ipsDir,
 		ResultsDir:   s.resultsDir,
 		ForceRefresh: req.Refresh,
+		PreferBackup: req.PreferBackup,
+		NoBackup:     req.NoBackup,
 		Sample: iprange.Strategy{
 			SamplePer24:     req.SamplePer24,
 			MaxHostsPerCIDR: req.MaxHostsPerCIDR,

@@ -52,6 +52,8 @@ type Config struct {
 	IPsDir          string
 	ResultsDir      string
 	ForceRefresh    bool
+	PreferBackup    bool // try backup source before official API
+	NoBackup        bool // use official CDN API only; skip backup mirror
 	Sample          iprange.Strategy
 	TCP             scan.Options
 	Prober          *xray.Prober
@@ -147,16 +149,23 @@ func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summa
 	s := Summary{CDN: name}
 
 	if cidrs == nil {
-		rf, err := providers.LoadOrRefresh(ctx, cfg.HTTPClient, name, cfg.IPsDir, cfg.ForceRefresh)
+		rf, err := providers.LoadOrRefresh(ctx, cfg.HTTPClient, name, cfg.IPsDir, cfg.ForceRefresh,
+			providers.FetchOptions{PreferBackup: cfg.PreferBackup, NoBackup: cfg.NoBackup})
 		if err != nil {
 			return s, err
 		}
 		cidrs = rf.CIDRs
+		s.Ranges = len(cidrs)
+		if rf.Source != "" {
+			cfg.Log("[%s] %d CIDR ranges (source: %s)", name, len(cidrs), rf.Source)
+		} else {
+			cfg.Log("[%s] %d CIDR ranges", name, len(cidrs))
+		}
 	} else {
 		cidrs = iprange.FilterV4(cidrs)
+		s.Ranges = len(cidrs)
+		cfg.Log("[%s] %d CIDR ranges", name, len(cidrs))
 	}
-	s.Ranges = len(cidrs)
-	cfg.Log("[%s] %d CIDR ranges", name, len(cidrs))
 
 	hosts, err := iprange.Expand(cidrs, cfg.Sample)
 	if err != nil {

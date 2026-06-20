@@ -18,6 +18,7 @@ import (
 	"cdnscan/internal/link"
 	"cdnscan/internal/output"
 	"cdnscan/internal/pipeline"
+	"cdnscan/internal/providers"
 	"cdnscan/internal/targets"
 )
 
@@ -171,7 +172,7 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	rec, err := s.svc.Reload(r.Context(), req.Name)
+	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -188,7 +189,7 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	results := s.svc.ReloadAll(r.Context())
+	results := s.svc.ReloadAll(r.Context(), providers.FetchOptions{})
 	reloaded, failed := 0, 0
 	for _, rr := range results {
 		if rr.Error != "" {

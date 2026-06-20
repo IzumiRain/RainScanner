@@ -17,6 +17,8 @@ import (
 	"sync"
 	"time"
 
+	"net/http"
+
 	"cdnscan/internal/app"
 	"cdnscan/internal/pipeline"
 	"cdnscan/internal/providers"
@@ -48,13 +50,16 @@ func main() {
 		probeTO     = flag.Duration("probe-timeout", 0, "stage2 per-request timeout (0 = auto: 2x max-latency, min 1.5s)")
 		samplePer24 = flag.Int("sample-per-24", 0, "sample N hosts per /24 (0 = full enumeration)")
 		maxPerCIDR  = flag.Int("max-hosts-per-cidr", 0, "cap hosts emitted per CIDR (0 = unlimited)")
-		refresh     = flag.Bool("refresh", false, "force re-fetch of provider ranges")
-		ipsDir      = flag.String("ips-dir", "ips", "directory for cached per-CDN ranges")
-		resultsDir  = flag.String("results-dir", "results", "directory for confirmed results")
-		listCDN     = flag.Bool("list", false, "list supported CDNs and exit")
-		showVersion = flag.Bool("version", false, "print version and exit")
-		serve       = flag.Bool("serve", false, "launch the web GUI instead of a CLI scan")
-		addr        = flag.String("addr", "127.0.0.1:8787", "web GUI listen address (with -serve)")
+		refresh      = flag.Bool("refresh", false, "force re-fetch of provider ranges")
+		preferBackup = flag.Bool("prefer-backup", false, "try repo mirror (jsDelivr→raw) before official CDN API")
+		noBackup     = flag.Bool("no-backup", false, "use official CDN API only; skip backup mirror")
+		updateDir    = flag.String("update-inside-api", "", "fetch fresh ranges into <dir>/<cdn>.json and exit")
+		ipsDir       = flag.String("ips-dir", "ips", "directory for cached per-CDN ranges")
+		resultsDir   = flag.String("results-dir", "results", "directory for confirmed results")
+		listCDN      = flag.Bool("list", false, "list supported CDNs and exit")
+		showVersion  = flag.Bool("version", false, "print version and exit")
+		serve        = flag.Bool("serve", false, "launch the web GUI instead of a CLI scan")
+		addr         = flag.String("addr", "127.0.0.1:8787", "web GUI listen address (with -serve)")
 	)
 	flag.Parse()
 
@@ -107,10 +112,35 @@ func main() {
 		log.Fatal(srv.Serve(ln))
 	}
 
+	// Load the CDN manifest (needed for -list, -cdn validation, and scans).
+	// Use a fresh client with a short timeout; -serve mode re-loads in app.New().
+	if !*serve {
+		mctx, mcancel := context.WithTimeout(context.Background(), 8*time.Second)
+		m, merr := providers.LoadManifest(mctx, &http.Client{Timeout: 8 * time.Second}, *ipsDir)
+		mcancel()
+		if merr != nil {
+			log.Printf("warning: CDN manifest unavailable (%v); only cached ranges will work", merr)
+			m = &providers.ManifestIndex{}
+		}
+		providers.SetManifest(m)
+	}
+
+	// -update-inside-api <dir>: fetch each non-manual CDN's official ranges and
+	// write <dir>/<cdn>.json. Leaves manual CDN files untouched.
+	if *updateDir != "" {
+		runUpdater(context.Background(), *updateDir)
+		return
+	}
+
 	if *listCDN {
 		fmt.Println("Supported CDNs:")
 		for _, n := range providers.Names() {
-			fmt.Println("  -", n)
+			p := providers.APIURL(n)
+			if p != "" {
+				fmt.Printf("  - %s  (%s)\n", n, p)
+			} else {
+				fmt.Printf("  - %s  (manual)\n", n)
+			}
 		}
 		return
 	}
@@ -175,6 +205,8 @@ func main() {
 			MaxTotal:        *maxTotal,
 			Lite:            *lite,
 			Refresh:         *refresh,
+			PreferBackup:    *preferBackup,
+			NoBackup:        *noBackup,
 		}, hooks)
 		if err != nil {
 			sb.finish()
@@ -325,11 +357,53 @@ func selectCDNs(arg string) []string {
 		if name == "" {
 			continue
 		}
-		if _, ok := providers.Get(name); !ok {
+		if _, ok := providers.GetEntry(name); !ok {
 			log.Printf("warning: unknown CDN %q (skipped)", name)
 			continue
 		}
 		out = append(out, name)
 	}
 	return out
+}
+
+// runUpdater fetches official ranges for every non-manual manifest CDN and
+// writes them to dir/<cdn>.json. Manual CDNs are skipped (never overwritten).
+func runUpdater(ctx context.Context, dir string) {
+	entries := providers.Entries()
+	if len(entries) == 0 {
+		log.Fatal("updater: no CDN manifest loaded; run with network access or restore ips/index.json")
+	}
+	client := &http.Client{Timeout: 30 * time.Second}
+	ok, skipped, failed := 0, 0, 0
+	for _, entry := range entries {
+		if entry.Parser == "manual" {
+			log.Printf("[%s] skipped (manual — owner-managed file)", entry.Name)
+			skipped++
+			continue
+		}
+		cidrs, source, err := providers.FetchRanges(ctx, client, entry, providers.FetchOptions{NoBackup: true})
+		if err != nil {
+			log.Printf("[%s] FAILED: %v", entry.Name, err)
+			failed++
+			continue
+		}
+		rf := &providers.RangeFile{
+			CDN:       entry.Name,
+			FetchedAt: time.Now().UTC().Format(time.RFC3339),
+			Count:     len(cidrs),
+			CIDRs:     cidrs,
+			Source:    source,
+		}
+		if err := providers.Save(dir, rf); err != nil {
+			log.Printf("[%s] write failed: %v", entry.Name, err)
+			failed++
+			continue
+		}
+		log.Printf("[%s] OK: %d CIDRs (source: %s)", entry.Name, len(cidrs), source)
+		ok++
+	}
+	log.Printf("updater done: %d updated, %d skipped (manual), %d failed", ok, skipped, failed)
+	if failed > 0 {
+		os.Exit(1)
+	}
 }
