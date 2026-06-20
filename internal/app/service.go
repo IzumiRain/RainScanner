@@ -33,16 +33,20 @@ type Service struct {
 // New opens the registry over the store and returns a ready Service. ipsDir and
 // resultsDir are retained for the scan engine's range cache + result writes.
 // New also loads and installs the CDN manifest so built-in names are available.
+// If a manifest is already installed (e.g. by a test or the CLI pre-load), the
+// network fetch is skipped to avoid latency and the pre-installed manifest is used.
 func New(store storage.Store, ipsDir, resultsDir string) (*Service, error) {
-	// Load the CDN manifest (best-effort; uses local cache on network failure).
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-	defer cancel()
-	manifest, err := providers.LoadManifest(ctx, &http.Client{Timeout: 8 * time.Second}, ipsDir)
-	if err != nil {
-		log.Printf("warning: could not load CDN manifest (%v); defaults unavailable until network restored", err)
-		manifest = &providers.ManifestIndex{}
+	if !providers.ManifestInstalled() {
+		// Load the CDN manifest (best-effort; uses local cache on network failure).
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		manifest, err := providers.LoadManifest(ctx, &http.Client{Timeout: 8 * time.Second}, ipsDir)
+		if err != nil {
+			log.Printf("warning: could not load CDN manifest (%v); defaults unavailable until network restored", err)
+			manifest = &providers.ManifestIndex{}
+		}
+		providers.SetManifest(manifest)
 	}
-	providers.SetManifest(manifest)
 
 	reg, err := targets.Open(store)
 	if err != nil {

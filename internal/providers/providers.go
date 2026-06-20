@@ -73,6 +73,15 @@ func SetManifest(m *ManifestIndex) {
 	manifestMu.Unlock()
 }
 
+// ManifestInstalled reports whether a manifest has been set via SetManifest.
+// app.New uses this to skip network loading in test environments that
+// pre-seed the manifest directly.
+func ManifestInstalled() bool {
+	manifestMu.RLock()
+	defer manifestMu.RUnlock()
+	return active != nil
+}
+
 func getManifest() *ManifestIndex {
 	manifestMu.RLock()
 	defer manifestMu.RUnlock()
