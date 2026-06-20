@@ -19,9 +19,10 @@ import (
 // CustomTarget is one user-added target as persisted in ips/custom.json.
 // (Built-in CDNs are persisted separately as ips/<name>.json.)
 type CustomTarget struct {
-	Name   string   `json:"name"`
-	CIDRs  []string `json:"cidrs"`
-	APIURL string   `json:"api_url,omitempty"`
+	Name    string   `json:"name"`
+	CIDRs   []string `json:"cidrs"`
+	APIURL  string   `json:"api_url,omitempty"`
+	Builtin bool     `json:"builtin"`
 }
 
 // customFile is the on-disk shape of ips/custom.json.
