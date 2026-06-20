@@ -36,7 +36,7 @@ func main() {
 		port        = flag.Int("port", 443, "target TCP port")
 		portsStr    = flag.String("ports", "", "comma-separated ports to scan (overrides -port; e.g. 443,80,8080)")
 		tcpConc     = flag.Int("tcp-concurrency", 0, "stage1 max concurrent TCP dials (0 = auto: scaled to CPU)")
-		_           = flag.Duration("tcp-timeout", 3*time.Second, "stage1 per-connection timeout")
+		tcpTimeout  = flag.Duration("tcp-timeout", 3*time.Second, "stage1 per-connection timeout")
 		xrayConc    = flag.Int("xray-concurrency", 0, "stage2 max concurrent xray processes (0 = auto)")
 		batchSize   = flag.Int("batch-size", 0, "stage2 candidates tested per xray process (0 = auto: 50)")
 		lite        = flag.Bool("lite", false, "low-power mode: hard-cap concurrency for weak machines")
@@ -162,6 +162,7 @@ func main() {
 			Link:            *linkStr,
 			XrayPath:        *xrayPath,
 			TCPConcurrency:  tcpConcN,
+			TCPTimeoutMS:    int(tcpTimeout.Milliseconds()),
 			XrayConcurrency: xrayConcN,
 			BatchSize:       batchN,
 			Probes:          *probes,

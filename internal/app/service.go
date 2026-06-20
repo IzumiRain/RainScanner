@@ -101,6 +101,7 @@ type ScanRequest struct {
 	Link            string
 	XrayPath        string
 	TCPConcurrency  int
+	TCPTimeoutMS    int
 	XrayConcurrency int
 	BatchSize       int
 	Probes          int
@@ -185,7 +186,7 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 			MaxHostsPerCIDR: req.MaxHostsPerCIDR,
 			MaxTotal:        req.MaxTotal,
 		},
-		TCP:             scan.Options{Port: port, Concurrency: tcpConc, Timeout: 3 * time.Second},
+		TCP:             scan.Options{Port: port, Concurrency: tcpConc, Timeout: time.Duration(orInt(req.TCPTimeoutMS, 3000)) * time.Millisecond},
 		Prober:          prober,
 		XrayConcurrency: xrayConc,
 		BatchSize:       batchSize,
