@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "cdns": [
+    {"name": "cloudflare",  "api": "https://www.cloudflare.com/ips-v4",              "parser": "scrape"},
+    {"name": "fastly",      "api": "https://api.fastly.com/public-ip-list",           "parser": "scrape"},
+    {"name": "cloudfront",  "api": "https://ip-ranges.amazonaws.com/ip-ranges.json",  "parser": "aws-cloudfront"},
+    {"name": "arvan",       "api": "https://www.arvancloud.ir/en/ips.txt",             "parser": "scrape"},
+    {"name": "railway",     "api": "",                                                 "parser": "manual"}
+  ]
+}
