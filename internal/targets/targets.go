@@ -1,4 +1,4 @@
-// Package targets is the in-memory + on-disk store of "scan targets" — the
+// Package targets is the in-memory store of "scan targets" — the
 // sources of candidate clean IPs. There are two kinds of target:
 //
 //   - Built-in CDNs (cloudflare, cloudfront, fastly, arvan): these are compiled
@@ -10,17 +10,14 @@
 //     personal additions are cleanly separated from the shipped defaults (and
 //     are easy to exclude from version control).
 //
-// The Store presents both kinds through one uniform API (List/Get/Upsert/
+// The Registry presents both kinds through one uniform API (List/Get/Upsert/
 // Delete/Reload) so the web layer doesn't have to care where a target is stored.
 package targets
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -28,6 +25,7 @@ import (
 
 	"cdnscan/internal/iprange"
 	"cdnscan/internal/providers"
+	"cdnscan/internal/storage"
 )
 
 // Record is one stored target as seen by callers and the GUI. It is the same
@@ -39,71 +37,48 @@ type Record struct {
 	Builtin bool     `json:"builtin"` // true => one of the compiled-in default CDNs
 }
 
-// customFile is the on-disk shape of ips/custom.json. It holds ONLY user-added
-// custom targets; built-in CDN ranges are stored separately as ips/<name>.json.
-type customFile struct {
-	UpdatedAt string   `json:"updated_at"`
-	Targets   []Record `json:"targets"`
-}
-
-// Store is a concurrency-safe collection of targets backed by the ips/ directory.
-// The in-memory recs slice is the source of truth during a run; mutations are
-// flushed to disk immediately (custom targets to custom.json, built-in range
-// edits to that CDN's own cache file).
-type Store struct {
-	ipsDir     string
-	customPath string
+// Registry is a concurrency-safe in-memory collection of targets. It is the
+// source of truth during a run; mutations are flushed through the storage.Store
+// (built-in range edits to ips/<name>.json, custom edits to ips/custom.json).
+type Registry struct {
+	store storage.Store
 
 	mu   sync.Mutex
 	recs []Record
 }
 
-// Open loads the store from the ips/ directory. Built-in CDNs are taken from the
-// compiled provider registry, with their CIDRs filled in from any cached
-// ips/<name>.json present (so the store is immediately usable offline). User
-// customs are then loaded from ips/custom.json if it exists. The returned store
-// is ready for concurrent use.
-func Open(ipsDir string) (*Store, error) {
-	s := &Store{ipsDir: ipsDir, customPath: filepath.Join(ipsDir, "custom.json")}
+// Open builds a Registry: built-in CDNs come from the provider registry (with
+// cached ranges filled in from the store), then user customs are loaded from the
+// store. Ready for concurrent use.
+func Open(store storage.Store) (*Registry, error) {
+	r := &Registry{store: store}
 
-	// Seed the built-in CDNs from the registry, pulling any cached ranges.
 	for _, name := range providers.Names() {
 		rec := Record{Name: name, Builtin: true, APIURL: providers.APIURL(name)}
-		if rf, err := providers.Load(ipsDir, name); err == nil {
+		if rf, err := store.Ranges(name); err == nil {
 			rec.CIDRs = rf.CIDRs
 		}
-		s.recs = append(s.recs, rec)
+		r.recs = append(r.recs, rec)
 	}
 
-	// Load user customs, if the file exists. A missing file is normal on first
-	// run and is not an error; a malformed file is reported so the user knows
-	// their customs failed to load rather than silently vanishing.
-	b, err := os.ReadFile(s.customPath)
+	customs, err := store.LoadCustoms()
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return nil, err
-		}
-		return s, nil
+		return nil, err
 	}
-	var f customFile
-	if err := json.Unmarshal(b, &f); err != nil {
-		return nil, fmt.Errorf("%s: parse: %w", s.customPath, err)
+	for _, c := range customs {
+		r.recs = append(r.recs, Record{Name: c.Name, CIDRs: c.CIDRs, APIURL: c.APIURL, Builtin: false})
 	}
-	for _, r := range f.Targets {
-		r.Builtin = false // anything in custom.json is, by definition, a custom
-		s.recs = append(s.recs, r)
-	}
-	return s, nil
+	return r, nil
 }
 
 // List returns a copy of all stored targets, built-ins first then customs, each
 // group sorted by name. A copy is returned so callers can't mutate the store's
 // internal slice without going through Upsert/Delete.
-func (s *Store) List() []Record {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	out := make([]Record, len(s.recs))
-	copy(out, s.recs)
+func (r *Registry) List() []Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Record, len(r.recs))
+	copy(out, r.recs)
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Builtin != out[j].Builtin {
 			return out[i].Builtin // built-ins first
@@ -114,43 +89,43 @@ func (s *Store) List() []Record {
 }
 
 // Get returns the named target (case-insensitive) and whether it exists.
-func (s *Store) Get(name string) (Record, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if i := s.indexOf(name); i >= 0 {
-		return s.recs[i], true
+func (r *Registry) Get(name string) (Record, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i := r.indexOf(name); i >= 0 {
+		return r.recs[i], true
 	}
 	return Record{}, false
 }
 
 // Upsert creates or replaces a target by name and persists it. CIDRs are
 // filtered to valid IPv4 entries first. The Builtin flag is decided by the
-// store, not the caller: a name that matches a compiled-in CDN is always treated
-// as that built-in (so editing cloudflare's ranges in the GUI updates the
-// built-in's cache file), and any other name is a custom. The persisted record
-// is returned.
-func (s *Store) Upsert(rec Record) (Record, error) {
+// registry, not the caller: a name that matches a compiled-in CDN is always
+// treated as that built-in (so editing cloudflare's ranges in the GUI updates
+// the built-in's cache file), and any other name is a custom. The persisted
+// record is returned.
+func (r *Registry) Upsert(rec Record) (Record, error) {
 	rec.Name = strings.TrimSpace(rec.Name)
 	if rec.Name == "" {
 		return Record{}, fmt.Errorf("target name is required")
 	}
 	rec.CIDRs = iprange.FilterV4(rec.CIDRs)
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
 	_, isBuiltin := providers.Get(rec.Name)
 	rec.Builtin = isBuiltin
 
-	if i := s.indexOf(rec.Name); i >= 0 {
+	if i := r.indexOf(rec.Name); i >= 0 {
 		// Preserve the canonical name's existing casing/flag for built-ins.
-		rec.Builtin = s.recs[i].Builtin || isBuiltin
-		s.recs[i] = rec
+		rec.Builtin = r.recs[i].Builtin || isBuiltin
+		r.recs[i] = rec
 	} else {
-		s.recs = append(s.recs, rec)
+		r.recs = append(r.recs, rec)
 	}
 
-	if err := s.persistLocked(rec); err != nil {
+	if err := r.persistLocked(rec); err != nil {
 		return Record{}, err
 	}
 	return rec, nil
@@ -160,18 +135,18 @@ func (s *Store) Upsert(rec Record) (Record, error) {
 // are part of the shipped defaults and are not removable; attempting to delete
 // one is a no-op that returns removed=false (with no error) so the GUI can treat
 // it gracefully. Returns whether a record was actually removed.
-func (s *Store) Delete(name string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	i := s.indexOf(name)
+func (r *Registry) Delete(name string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i := r.indexOf(name)
 	if i < 0 {
 		return false, nil
 	}
-	if s.recs[i].Builtin {
+	if r.recs[i].Builtin {
 		return false, nil // defaults are not deletable
 	}
-	s.recs = append(s.recs[:i], s.recs[i+1:]...)
-	if err := s.saveCustomsLocked(); err != nil {
+	r.recs = append(r.recs[:i], r.recs[i+1:]...)
+	if err := r.saveCustomsLocked(); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -182,8 +157,8 @@ func (s *Store) Delete(name string) (bool, error) {
 // everything else (a custom target, or a built-in whose API URL the user has
 // overridden) falls back to the generic IPv4-CIDR scraper. The refreshed record
 // is returned.
-func (s *Store) Reload(ctx context.Context, c *http.Client, name string) (Record, error) {
-	rec, ok := s.Get(name)
+func (r *Registry) Reload(ctx context.Context, c *http.Client, name string) (Record, error) {
+	rec, ok := r.Get(name)
 	if !ok {
 		return Record{}, fmt.Errorf("unknown target %q", name)
 	}
@@ -207,54 +182,41 @@ func (s *Store) Reload(ctx context.Context, c *http.Client, name string) (Record
 	}
 	sort.Strings(cidrs)
 	rec.CIDRs = cidrs
-	return s.Upsert(rec)
+	return r.Upsert(rec)
 }
 
 // indexOf returns the position of name (case-insensitive) or -1. Caller holds mu.
-func (s *Store) indexOf(name string) int {
+func (r *Registry) indexOf(name string) int {
 	name = strings.TrimSpace(name)
-	for i := range s.recs {
-		if strings.EqualFold(s.recs[i].Name, name) {
+	for i := range r.recs {
+		if strings.EqualFold(r.recs[i].Name, name) {
 			return i
 		}
 	}
 	return -1
 }
 
-// persistLocked writes a single record to the right place: a built-in CDN's
-// ranges go to its own cache file ips/<name>.json (providers RangeFile format),
-// while a custom target triggers a rewrite of the consolidated custom.json.
-// Caller holds mu.
-func (s *Store) persistLocked(rec Record) error {
+// persistLocked writes a record to the right place via the store. Caller holds mu.
+func (r *Registry) persistLocked(rec Record) error {
 	if rec.Builtin {
-		rf := &providers.RangeFile{
+		return r.store.SaveRanges(&providers.RangeFile{
 			CDN:       rec.Name,
 			FetchedAt: time.Now().UTC().Format(time.RFC3339),
 			Count:     len(rec.CIDRs),
 			CIDRs:     rec.CIDRs,
-		}
-		return providers.Save(s.ipsDir, rf)
+		})
 	}
-	return s.saveCustomsLocked()
+	return r.saveCustomsLocked()
 }
 
-// saveCustomsLocked rewrites ips/custom.json from the current custom records.
-// Built-ins are skipped entirely — they never appear in custom.json. Caller
-// holds mu.
-func (s *Store) saveCustomsLocked() error {
-	if err := os.MkdirAll(s.ipsDir, 0o755); err != nil {
-		return err
-	}
-	var customs []Record
-	for _, r := range s.recs {
-		if !r.Builtin {
-			customs = append(customs, r)
+// saveCustomsLocked rewrites custom storage from the current custom records.
+// Caller holds mu.
+func (r *Registry) saveCustomsLocked() error {
+	var customs []storage.CustomTarget
+	for _, rec := range r.recs {
+		if !rec.Builtin {
+			customs = append(customs, storage.CustomTarget{Name: rec.Name, CIDRs: rec.CIDRs, APIURL: rec.APIURL})
 		}
 	}
-	f := customFile{UpdatedAt: time.Now().UTC().Format(time.RFC3339), Targets: customs}
-	b, err := json.MarshalIndent(f, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(s.customPath, b, 0o644)
+	return r.store.SaveCustoms(customs)
 }
