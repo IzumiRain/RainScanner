@@ -410,6 +410,8 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
               <div class="gh"><span>⚡</span> Performance</div>
               <label class="switch"><input type="checkbox" id="lite" /><span class="track"></span>Lite mode (low-power — caps load on weak PCs)</label>
               <div class="hint">Hard-caps concurrency (2 xray / 100 TCP). Leave blank for auto (CPU-scaled).</div>
+              <label class="switch"><input type="checkbox" id="prefer_backup" /><span class="track"></span>Prefer backup source (sanctioned networks)</label>
+              <div class="hint">Try jsDelivr / GitHub raw mirror before the CDN's official API. Use if Fastly or other CDN APIs are blocked in your region.</div>
               <div class="row">
                 <div><label>TCP concurrency</label><input type="number" id="tcpc" placeholder="auto" /></div>
                 <div><label>Xray procs</label><input type="number" id="xrayc" placeholder="auto" /></div>
@@ -637,7 +639,11 @@ function showRanges(cidrs){
 async function reloadAllCdns(){
   const b=$('reloadAll'); b.disabled=true; b.classList.add('spin');
   try{
-    const r=await fetch('/api/targets/reload-all',{method:'POST'});
+    const r=await fetch('/api/targets/reload-all',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({prefer_backup:!!($('prefer_backup')&&$('prefer_backup').checked)})
+    });
     const d=await r.json().catch(()=>({}));
     if(!r.ok){ alert('reload failed: '+((d&&d.error)||r.status)); return; }
     await loadTargets(true);
@@ -713,7 +719,8 @@ async function start(){
     probes:+$('probes').value, confirm:+$('confirm').value, max_latency_ms:+$('maxlat').value,
     probe_timeout_ms:+$('probeto').value||0,
     sample_per_24:+$('sample').value, max_hosts_per_cidr:+$('maxhost').value,
-    max_total:+$('maxtotal').value||0, refresh:$('refresh').checked
+    max_total:+$('maxtotal').value||0, refresh:$('refresh').checked,
+    prefer_backup:$('prefer_backup').checked
   };
   body.cdn=target.name;
 
@@ -813,7 +820,7 @@ async function reloadRanges(){
         body:JSON.stringify({name, cidrs:$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean), api_url:url})});
     }
     const r=await fetch('/api/targets/reload',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name})});
+      body:JSON.stringify({name, prefer_backup:!!($('prefer_backup')&&$('prefer_backup').checked)})});
     if(!r.ok){ $('cReloadMsg').textContent='reload failed: '+await r.text(); return; }
     const rec=await r.json();
     $('cRanges').value=(rec.cidrs||[]).join('\n'); countRanges();

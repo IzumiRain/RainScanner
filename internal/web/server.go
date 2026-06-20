@@ -159,20 +159,21 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTargetReload re-fetches a target's ranges from its API URL and persists
-// them, returning the refreshed record. Body: {"name":"..."}.
+// them, returning the refreshed record. Body: {"name":"...","prefer_backup":false}.
 func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Name string `json:"name"`
+		Name         string `json:"name"`
+		PreferBackup bool   `json:"prefer_backup"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{})
+	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{PreferBackup: req.PreferBackup})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -184,12 +185,18 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 // from (all built-in CDNs, plus any custom with a URL) and persists the refreshed
 // ranges. It always returns 200 with a per-target summary so the GUI can report
 // partial success — one feed being down doesn't fail the whole reload.
+// Body: {"prefer_backup":false} (optional; empty body treated as false).
 func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	results := s.svc.ReloadAll(r.Context(), providers.FetchOptions{})
+	var req struct {
+		PreferBackup bool `json:"prefer_backup"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req) // best-effort; empty body = no backup pref
+	opts := providers.FetchOptions{PreferBackup: req.PreferBackup}
+	results := s.svc.ReloadAll(r.Context(), opts)
 	reloaded, failed := 0, 0
 	for _, rr := range results {
 		if rr.Error != "" {
@@ -224,8 +231,10 @@ type scanReq struct {
 	SamplePer24     int        `json:"sample_per_24"`
 	MaxHostsPerCIDR int        `json:"max_hosts_per_cidr"`
 	MaxTotal        int        `json:"max_total"` // random-sample cap across the whole pool (0 = all)
-	Lite            bool       `json:"lite"`      // low-power mode: hard-cap concurrency
+	Lite            bool       `json:"lite"`          // low-power mode: hard-cap concurrency
 	Refresh         bool       `json:"refresh"`
+	PreferBackup    bool       `json:"prefer_backup"` // try backup source before official API
+	NoBackup        bool       `json:"no_backup"`     // skip backup sources entirely
 }
 
 // scanResult is the consolidated payload sent in the SSE "result" event for the
@@ -251,6 +260,7 @@ func toScanRequest(req scanReq) app.ScanRequest {
 		Probes: req.Probes, Confirm: req.Confirm, MaxLatencyMS: req.MaxLatencyMS, ProbeTimeoutMS: req.ProbeTimeoutMS,
 		ProbeURL: req.ProbeURL, SamplePer24: req.SamplePer24, MaxHostsPerCIDR: req.MaxHostsPerCIDR,
 		MaxTotal: req.MaxTotal, Lite: req.Lite, Refresh: req.Refresh,
+		PreferBackup: req.PreferBackup, NoBackup: req.NoBackup,
 	}
 	if req.Custom != nil {
 		sr.Custom = &app.CustomRange{Name: req.Custom.Name, CIDRs: req.Custom.CIDRs}
