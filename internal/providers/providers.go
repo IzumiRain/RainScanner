@@ -1,9 +1,12 @@
-// Package providers knows how to fetch published IPv4 ranges for each supported
-// CDN and cache them as structured per-CDN files under the ips/ directory.
+// Package providers resolves CDN IP ranges from a data-driven manifest.
+// Built-in CDNs are defined in inside-api/index.json (committed to the repo and
+// mirrored via jsDelivr / GitHub raw). A manifest is loaded at startup via
+// LoadManifest and installed with SetManifest; Names/GetEntry/Entries read it.
+// FetchRanges is the single entry point for fetching a CDN's ranges; it
+// encapsulates source ordering (official → backup) and parser dispatch.
 package providers
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,104 +18,276 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cdnscan/internal/iprange"
 )
 
-// Provider describes one CDN and how to obtain its published IPv4 CIDR list.
-// Every supported CDN is registered as one Provider in the package registry
-// (see init). The two pieces that vary per CDN are the feed URL and the parser
-// that turns that feed's particular format (plain text, JSON, ...) into a flat
-// list of CIDR strings; everything else (caching, filtering, sorting) is shared.
-type Provider struct {
-	Name string
-	// APIURL is the canonical published feed for this CDN. It is surfaced in the
-	// GUI so the user can see exactly where the ranges come from and override it
-	// if a CDN moves its endpoint. It is also reused by the fetcher below so the
-	// URL shown in the UI and the URL actually downloaded can never drift apart.
-	APIURL string
-	// Fetch downloads APIURL (or whatever source this provider uses) and returns
-	// the raw list of CIDR strings it found. Validation/normalisation to IPv4 is
-	// done by the caller (Refresh), so a fetcher only has to extract strings.
-	Fetch func(ctx context.Context, c *http.Client) ([]string, error)
+// ── Manifest types ───────────────────────────────────────────────────────────
+
+// ManifestEntry describes one CDN in the manifest.
+type ManifestEntry struct {
+	Name   string `json:"name"`
+	APIURL string `json:"api"`
+	Parser string `json:"parser"` // "scrape" | "aws-cloudfront" | "manual"
 }
 
+// ManifestIndex is the root of inside-api/index.json.
+type ManifestIndex struct {
+	Version int             `json:"version"`
+	CDNs    []ManifestEntry `json:"cdns"`
+}
+
+// FetchOptions controls which sources FetchRanges tries and in what order.
+// Zero value = normal order: official first, backup allowed.
+type FetchOptions struct {
+	PreferBackup bool // try backup (jsDelivr→raw) before official API
+	NoBackup     bool // skip backup entirely; official only (overrides PreferBackup)
+}
+
+// ── RangeFile ────────────────────────────────────────────────────────────────
+
 // RangeFile is the on-disk structure written to ips/<cdn>.json.
+// Source records which data source provided these ranges (for logging).
 type RangeFile struct {
 	CDN       string   `json:"cdn"`
 	FetchedAt string   `json:"fetched_at"`
 	Count     int      `json:"count"`
 	CIDRs     []string `json:"cidrs"`
+	Source    string   `json:"source,omitempty"` // "official"|"jsdelivr"|"github-raw"|"manual"|""
 }
 
-// Canonical published feeds per CDN. These constants are referenced from two
-// places — the Provider registration below and the format-specific fetchers —
-// so that the API URL the GUI displays is byte-for-byte the URL that is actually
-// downloaded. Defining them once removes any chance of the two drifting apart.
-const (
-	urlCloudflare = "https://www.cloudflare.com/ips-v4"
-	urlFastly     = "https://api.fastly.com/public-ip-list"
-	urlCloudFront = "https://ip-ranges.amazonaws.com/ip-ranges.json"
-	urlArvan      = "https://www.arvancloud.ir/en/ips.txt"
+// ── Package-level manifest state ─────────────────────────────────────────────
+
+var (
+	manifestMu sync.RWMutex
+	active     *ManifestIndex
 )
 
-// registry holds every known Provider keyed by its lowercase name. It is
-// populated once at startup by init() and only ever read afterwards, so no
-// locking is needed.
-var registry = map[string]Provider{}
-
-func register(p Provider) { registry[p.Name] = p }
-
-// init registers the shipped, built-in CDNs. These four are the defaults that
-// exist out of the box; any extra ranges a user adds in the GUI are stored
-// separately as "custom" targets (see the targets package) rather than here.
-func init() {
-	// Cloudflare publishes a plain-text list of one CIDR per line.
-	register(Provider{Name: "cloudflare", APIURL: urlCloudflare, Fetch: fetchCloudflare})
-	// Fastly publishes a JSON document with an "addresses" array.
-	register(Provider{Name: "fastly", APIURL: urlFastly, Fetch: fetchFastly})
-	// CloudFront ranges are buried inside AWS's combined ip-ranges.json and must
-	// be filtered to the CLOUDFRONT service.
-	register(Provider{Name: "cloudfront", APIURL: urlCloudFront, Fetch: fetchCloudFront})
-	// ArvanCloud publishes a plain-text list; we extract CIDRs generically.
-	register(Provider{Name: "arvan", APIURL: urlArvan, Fetch: fetchArvan})
+// SetManifest installs the active manifest. Called once at startup (main.go).
+// Pass nil to clear (useful in tests).
+func SetManifest(m *ManifestIndex) {
+	manifestMu.Lock()
+	active = m
+	manifestMu.Unlock()
 }
 
-// Names returns the sorted list of supported CDN names.
+func getManifest() *ManifestIndex {
+	manifestMu.RLock()
+	defer manifestMu.RUnlock()
+	return active
+}
+
+// Names returns the sorted list of CDN names from the active manifest.
 func Names() []string {
-	out := make([]string, 0, len(registry))
-	for n := range registry {
-		out = append(out, n)
+	m := getManifest()
+	if m == nil {
+		return nil
+	}
+	out := make([]string, len(m.CDNs))
+	for i, e := range m.CDNs {
+		out[i] = e.Name
 	}
 	sort.Strings(out)
 	return out
 }
 
-// Get returns a provider by name.
-func Get(name string) (Provider, bool) {
-	p, ok := registry[strings.ToLower(name)]
-	return p, ok
-}
-
-// APIURL returns the canonical feed URL for a registered provider, or "" if the
-// name is unknown or the provider has no official feed.
-func APIURL(name string) string {
-	if p, ok := Get(name); ok {
-		return p.APIURL
+// Entries returns all manifest entries.
+func Entries() []ManifestEntry {
+	m := getManifest()
+	if m == nil {
+		return nil
 	}
-	return ""
+	out := make([]ManifestEntry, len(m.CDNs))
+	copy(out, m.CDNs)
+	return out
 }
 
-// cidrRe matches an IPv4 CIDR or a bare IPv4 address anywhere in a blob of text.
-// Used by the generic scraper so a user-supplied feed URL of any shape (plain
-// text list, JSON, HTML) can still yield ranges without a format-specific parser.
+// GetEntry returns the manifest entry for name (case-insensitive).
+func GetEntry(name string) (ManifestEntry, bool) {
+	m := getManifest()
+	if m == nil {
+		return ManifestEntry{}, false
+	}
+	name = strings.ToLower(name)
+	for _, e := range m.CDNs {
+		if strings.ToLower(e.Name) == name {
+			return e, true
+		}
+	}
+	return ManifestEntry{}, false
+}
+
+// APIURL returns the canonical feed URL for a CDN, or "" if unknown.
+func APIURL(name string) string {
+	e, ok := GetEntry(name)
+	if !ok {
+		return ""
+	}
+	return e.APIURL
+}
+
+// ── Manifest loading ──────────────────────────────────────────────────────────
+
+const (
+	jsdelivrBase = "https://cdn.jsdelivr.net/gh/IzumiRain/RainScanner@main/inside-api/"
+	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/main/inside-api/"
+)
+
+// LoadManifest fetches the manifest from jsDelivr → GitHub raw → local cache.
+// On a successful remote fetch the local cache (ipsDir/index.json) is refreshed.
+// Returns an empty non-nil index if all sources fail but no error so callers
+// can start with zero CDNs rather than crashing.
+func LoadManifest(ctx context.Context, c *http.Client, ipsDir string) (*ManifestIndex, error) {
+	for _, url := range []string{jsdelivrBase + "index.json", githubBase + "index.json"} {
+		if m, err := fetchManifestFrom(ctx, c, url); err == nil {
+			_ = saveLocalManifest(ipsDir, m) // best-effort cache refresh
+			return m, nil
+		}
+	}
+	// Fall back to local cache.
+	return loadLocalManifest(ipsDir)
+}
+
+func fetchManifestFrom(ctx context.Context, c *http.Client, url string) (*ManifestIndex, error) {
+	b, err := httpGet(ctx, c, url)
+	if err != nil {
+		return nil, err
+	}
+	var m ManifestIndex
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("parse manifest from %s: %w", url, err)
+	}
+	return &m, nil
+}
+
+func saveLocalManifest(ipsDir string, m *ManifestIndex) error {
+	if err := os.MkdirAll(ipsDir, 0o755); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(ipsDir, "index.json"), b, 0o644)
+}
+
+func loadLocalManifest(ipsDir string) (*ManifestIndex, error) {
+	b, err := os.ReadFile(filepath.Join(ipsDir, "index.json"))
+	if err != nil {
+		return &ManifestIndex{}, fmt.Errorf("manifest unavailable (no network and no local cache): %w", err)
+	}
+	var m ManifestIndex
+	if err := json.Unmarshal(b, &m); err != nil {
+		return &ManifestIndex{}, fmt.Errorf("parse local manifest: %w", err)
+	}
+	return &m, nil
+}
+
+// ── FetchRanges ───────────────────────────────────────────────────────────────
+
+// FetchRanges resolves CIDRs for entry by trying sources in order per opts.
+// source ∈ {"official","jsdelivr","github-raw","manual"}.
+// Returns an error only when ALL attempted sources fail.
+func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts FetchOptions) ([]string, string, error) {
+	official := func() ([]string, string, error) {
+		cidrs, err := runParser(ctx, c, entry)
+		return cidrs, "official", err
+	}
+	backup := func() ([]string, string, error) {
+		return fetchBackupFile(ctx, c, entry.Name)
+	}
+
+	// manual parser: never call official; backup-only.
+	if entry.Parser == "manual" {
+		if opts.NoBackup {
+			return nil, "", fmt.Errorf("%s: parser=manual but backup disabled", entry.Name)
+		}
+		return backup()
+	}
+
+	var lastErr error
+	if opts.PreferBackup && !opts.NoBackup {
+		if cidrs, src, err := backup(); err == nil {
+			return cidrs, src, nil
+		} else {
+			lastErr = err
+		}
+		if cidrs, src, err := official(); err == nil {
+			return cidrs, src, nil
+		} else {
+			lastErr = err
+		}
+	} else {
+		if cidrs, src, err := official(); err == nil {
+			return cidrs, src, nil
+		} else {
+			lastErr = err
+		}
+		if !opts.NoBackup {
+			if cidrs, src, err := backup(); err == nil {
+				return cidrs, src, nil
+			} else {
+				lastErr = err
+			}
+		}
+	}
+	return nil, "", fmt.Errorf("%s: all sources failed: %w", entry.Name, lastErr)
+}
+
+// fetchBackupFile tries jsDelivr then GitHub raw for inside-api/<name>.json.
+func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string, string, error) {
+	type candidate struct {
+		url    string
+		source string
+	}
+	for _, cand := range []candidate{
+		{jsdelivrBase + name + ".json", "jsdelivr"},
+		{githubBase + name + ".json", "github-raw"},
+	} {
+		b, err := httpGet(ctx, c, cand.url)
+		if err != nil {
+			continue
+		}
+		var rf RangeFile
+		if err := json.Unmarshal(b, &rf); err != nil {
+			continue
+		}
+		if len(rf.CIDRs) == 0 {
+			continue
+		}
+		return rf.CIDRs, cand.source, nil
+	}
+	return nil, "", fmt.Errorf("backup unavailable for %s", name)
+}
+
+// ── Parser strategies ─────────────────────────────────────────────────────────
+
+// runParser dispatches the entry's Parser field to the right strategy.
+// Unknown parsers log a warning and return an error (they do NOT fall through
+// to backup — that is FetchRanges's job — so the caller can decide).
+func runParser(ctx context.Context, c *http.Client, entry ManifestEntry) ([]string, error) {
+	switch entry.Parser {
+	case "scrape":
+		return ScrapeCIDRs(ctx, c, entry.APIURL)
+	case "aws-cloudfront":
+		return fetchAWSCloudFront(ctx, c, entry.APIURL)
+	case "manual":
+		// manual entries are intercepted before runParser in FetchRanges.
+		return nil, fmt.Errorf("%s: parser=manual has no official fetch", entry.Name)
+	default:
+		return nil, fmt.Errorf("%s: unknown parser %q", entry.Name, entry.Parser)
+	}
+}
+
+// ── Shared fetch / cache helpers ──────────────────────────────────────────────
+
+// cidrRe matches an IPv4 CIDR or bare IPv4 address anywhere in text.
 var cidrRe = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?)\b`)
 
-// ScrapeCIDRs fetches url and extracts every valid IPv4 CIDR / bare IP it can
-// find, regardless of response format. Bare IPs are normalised to /32. Results
-// are de-duplicated and sorted. This backs the GUI "reload range IPs" button for
-// arbitrary (non-built-in) feed URLs.
+// ScrapeCIDRs fetches url and extracts every valid IPv4 CIDR / bare IP.
+// Bare IPs are normalised to /32. Results are de-duplicated and sorted.
 func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, error) {
 	b, err := httpGet(ctx, c, url)
 	if err != nil {
@@ -143,15 +318,41 @@ func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, err
 	return out, nil
 }
 
-// Refresh fetches a provider's ranges and writes ips/<cdn>.json.
-func Refresh(ctx context.Context, c *http.Client, name, ipsDir string) (*RangeFile, error) {
-	p, ok := Get(name)
-	if !ok {
-		return nil, fmt.Errorf("unknown CDN %q (supported: %s)", name, strings.Join(Names(), ", "))
-	}
-	cidrs, err := p.Fetch(ctx, c)
+func fetchAWSCloudFront(ctx context.Context, c *http.Client, url string) ([]string, error) {
+	b, err := httpGet(ctx, c, url)
 	if err != nil {
-		return nil, fmt.Errorf("%s: fetch: %w", name, err)
+		return nil, err
+	}
+	var doc struct {
+		Prefixes []struct {
+			IPPrefix string `json:"ip_prefix"`
+			Service  string `json:"service"`
+		} `json:"prefixes"`
+	}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, p := range doc.Prefixes {
+		if p.Service == "CLOUDFRONT" {
+			out = append(out, p.IPPrefix)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no CLOUDFRONT prefixes found in AWS ip-ranges.json")
+	}
+	return out, nil
+}
+
+// Refresh fetches a CDN's ranges and writes ips/<cdn>.json.
+func Refresh(ctx context.Context, c *http.Client, name, ipsDir string, opts FetchOptions) (*RangeFile, error) {
+	entry, ok := GetEntry(name)
+	if !ok {
+		return nil, fmt.Errorf("unknown CDN %q (not in active manifest)", name)
+	}
+	cidrs, source, err := FetchRanges(ctx, c, entry, opts)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", name, err)
 	}
 	cidrs = iprange.FilterV4(cidrs)
 	sort.Strings(cidrs)
@@ -160,6 +361,7 @@ func Refresh(ctx context.Context, c *http.Client, name, ipsDir string) (*RangeFi
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
 		Count:     len(cidrs),
 		CIDRs:     cidrs,
+		Source:    source,
 	}
 	if err := Save(ipsDir, rf); err != nil {
 		return nil, err
@@ -190,18 +392,17 @@ func Save(ipsDir string, rf *RangeFile) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(ipsDir, rf.CDN+".json")
-	return os.WriteFile(path, b, 0o644)
+	return os.WriteFile(filepath.Join(ipsDir, rf.CDN+".json"), b, 0o644)
 }
 
-// LoadOrRefresh returns cached ranges if present, otherwise fetches them.
-func LoadOrRefresh(ctx context.Context, c *http.Client, name, ipsDir string, forceRefresh bool) (*RangeFile, error) {
-	if !forceRefresh {
+// LoadOrRefresh returns cached ranges if present and not stale, otherwise refreshes.
+func LoadOrRefresh(ctx context.Context, c *http.Client, name, ipsDir string, force bool, opts FetchOptions) (*RangeFile, error) {
+	if !force {
 		if rf, err := Load(ipsDir, name); err == nil && rf.Count > 0 {
 			return rf, nil
 		}
 	}
-	return Refresh(ctx, c, name, ipsDir)
+	return Refresh(ctx, c, name, ipsDir, opts)
 }
 
 func httpGet(ctx context.Context, c *http.Client, url string) ([]byte, error) {
@@ -209,7 +410,7 @@ func httpGet(ctx context.Context, c *http.Client, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("User-Agent", "cdnscan/1.0")
+	req.Header.Set("User-Agent", "cdnscan/2.0")
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, err
@@ -219,65 +420,4 @@ func httpGet(ctx context.Context, c *http.Client, url string) ([]byte, error) {
 		return nil, fmt.Errorf("GET %s: status %d", url, resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-}
-
-func fetchCloudflare(ctx context.Context, c *http.Client) ([]string, error) {
-	b, err := httpGet(ctx, c, urlCloudflare)
-	if err != nil {
-		return nil, err
-	}
-	var out []string
-	sc := bufio.NewScanner(strings.NewReader(string(b)))
-	for sc.Scan() {
-		if line := strings.TrimSpace(sc.Text()); line != "" {
-			out = append(out, line)
-		}
-	}
-	return out, sc.Err()
-}
-
-func fetchFastly(ctx context.Context, c *http.Client) ([]string, error) {
-	b, err := httpGet(ctx, c, urlFastly)
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		Addresses []string `json:"addresses"`
-	}
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, err
-	}
-	return doc.Addresses, nil
-}
-
-func fetchCloudFront(ctx context.Context, c *http.Client) ([]string, error) {
-	b, err := httpGet(ctx, c, urlCloudFront)
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		Prefixes []struct {
-			IPPrefix string `json:"ip_prefix"`
-			Service  string `json:"service"`
-		} `json:"prefixes"`
-	}
-	if err := json.Unmarshal(b, &doc); err != nil {
-		return nil, err
-	}
-	var out []string
-	for _, p := range doc.Prefixes {
-		if p.Service == "CLOUDFRONT" {
-			out = append(out, p.IPPrefix)
-		}
-	}
-	return out, nil
-}
-
-// fetchArvan downloads ArvanCloud's published IP list. The feed is a simple
-// plain-text document (one CIDR per line), but rather than assume an exact
-// layout we hand it to the generic ScrapeCIDRs extractor, which pulls every
-// valid IPv4 CIDR out of the response regardless of surrounding formatting.
-// That keeps this fetcher robust if Arvan ever wraps the list in extra text.
-func fetchArvan(ctx context.Context, c *http.Client) ([]string, error) {
-	return ScrapeCIDRs(ctx, c, urlArvan)
 }
