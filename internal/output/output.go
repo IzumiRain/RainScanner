@@ -9,6 +9,7 @@ package output
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -70,7 +71,7 @@ func Write(dir, cdn string, entries []Entry) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	path := filepath.Join(dir, sanitizeName(cdn)+".json")
+	path := Path(dir, cdn)
 	return path, os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
@@ -127,4 +128,24 @@ func sanitizeName(name string) string {
 		return "custom"
 	}
 	return out
+}
+
+// Path returns the on-disk path results/<sanitized-name>.json for a target,
+// using the same sanitisation Write applies, so readers and writers agree.
+func Path(dir, name string) string {
+	return filepath.Join(dir, sanitizeName(name)+".json")
+}
+
+// Read loads a previously written results/<name>.json. A missing file returns
+// an error the caller can treat as "no results yet".
+func Read(dir, name string) (*ResultFile, error) {
+	b, err := os.ReadFile(Path(dir, name))
+	if err != nil {
+		return nil, err
+	}
+	var rf ResultFile
+	if err := json.Unmarshal(b, &rf); err != nil {
+		return nil, fmt.Errorf("%s: parse: %w", Path(dir, name), err)
+	}
+	return &rf, nil
 }
