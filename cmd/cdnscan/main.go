@@ -177,8 +177,8 @@ func main() {
 			Refresh:         *refresh,
 		}, hooks)
 		if err != nil {
-			log.Printf("[%s] %v", cdn, err)
-			continue
+			sb.finish()
+			log.Fatalf("[%s] %v", cdn, err)
 		}
 		summaries = append(summaries, sums...)
 	}
