@@ -19,7 +19,7 @@ jobs:
         with:
           go-version: '1.26'
       - name: Fetch and update range files
-        run: go run ./cmd/cdnscan -update-inside-api inside-api
+        run: go run ./cmd/cdnscan --ips-dir inside-api -update-inside-api inside-api
       - name: Commit if changed
         run: |
           git config user.name  "github-actions[bot]"
