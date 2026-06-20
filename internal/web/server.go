@@ -465,10 +465,3 @@ func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
-
-func orInt(v, def int) int {
-	if v <= 0 {
-		return def
-	}
-	return v
-}
