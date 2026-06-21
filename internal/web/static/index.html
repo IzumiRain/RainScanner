@@ -379,7 +379,7 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
     <img class="logo" src="/static/logo.png" alt="RainScanner logo" />
     <div class="brand">
       <!-- keep version in sync with the `version` const in cmd/cdnscan/main.go -->
-      <h1>RainScanner <span class="ver">v2.0.0-beta</span></h1>
+      <h1>RainScanner <span class="ver">v2.0.0</span></h1>
       <span class="tag">unified CDN clean-IP scanner · real Xray latency</span>
     </div>
     <div class="xupd">
@@ -404,7 +404,7 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
               <button type="button" class="src-opt on" data-bk="0">official api</button>
             </div>
             <input type="checkbox" id="prefer_backup" hidden />
-            <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs from their sources"><span class="ra-ic">⟳</span></button>
+            <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs. Restores built-in defaults from GitHub (deleted built-ins come back); your custom CDNs are kept."><span class="ra-ic">⟳</span></button>
           </div>
         </div>
         <div class="cdns" id="cdns"></div>
@@ -663,8 +663,11 @@ async function reloadAllCdns(){
     if(!r.ok){ alert('reload failed: '+((d&&d.error)||r.status)); return; }
     await loadTargets(true);
     const fails=(d.results||[]).filter(x=>x.error);
+    const restored=(d.restored||[]);
     if(fails.length){
       alert('Reloaded '+d.reloaded+' CDN(s); '+d.failed+' failed:\n'+fails.map(f=>'• '+f.name+': '+f.error).join('\n'));
+    } else if(restored.length){
+      logLine('Restored built-in default(s) from GitHub: '+restored.join(', '), 'l-ok');
     }
   }catch(e){ alert('reload failed: '+e); }
   finally{ b.disabled=false; b.classList.remove('spin'); }

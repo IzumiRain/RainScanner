@@ -73,17 +73,19 @@ func (s *Service) Reload(ctx context.Context, name string, opts providers.FetchO
 }
 
 // RefreshManifest re-fetches the CDN manifest (GitHub raw → jsDelivr) and
-// surfaces any newly-published built-in CDNs into the registry without a restart.
-// It is additive: existing edits and local deletions survive. Returns the names
-// of CDNs newly added. Best-effort: a manifest fetch failure leaves the current
-// set in place and returns the error.
+// force-restores the built-in set from it: GitHub owns the built-ins, so any
+// default the user deleted is un-hidden and re-added, and newly-published CDNs
+// are surfaced — all without a restart. Custom (user-added) targets are left
+// untouched. Built-in ranges are refreshed separately by ReloadAll. Returns the
+// names restored. Best-effort: a manifest fetch failure leaves the current set in
+// place and returns the error.
 func (s *Service) RefreshManifest(ctx context.Context) ([]string, error) {
 	m, err := providers.LoadManifest(ctx, &http.Client{Timeout: 15 * time.Second}, s.ipsDir)
 	if err != nil {
 		return nil, err
 	}
 	providers.SetManifest(m)
-	return s.reg.SyncBuiltins()
+	return s.reg.RestoreBuiltins()
 }
 
 // ReloadResult is one target's outcome in ReloadAll.

@@ -86,21 +86,38 @@ func Open(store storage.Store) (*Registry, error) {
 	return r, nil
 }
 
-// SyncBuiltins re-reads the active manifest and adds any newly-published
-// built-in CDNs that are not already present and not hidden. It is purely
-// additive: it never removes or overwrites an existing record, so user edits and
-// deletions survive. Call it after refreshing the manifest to surface CDNs added
-// upstream without a restart. Returns the names that were added.
-func (r *Registry) SyncBuiltins() ([]string, error) {
+// RestoreBuiltins force-restores the built-in set from the active manifest:
+// GitHub is authoritative for built-ins, so this clears the hidden set (any
+// default the user deleted comes back) and adds every manifest built-in not
+// currently present. Custom (user-added) targets are never touched. Built-in
+// RANGES are not changed here — the caller's ReloadAll overwrites them from the
+// chosen source (GitHub inside-api when prefer_backup). Call it after refreshing
+// the manifest on an explicit reload-all. Returns the names restored (those that
+// were hidden or freshly added), de-duplicated.
+//
+// Consequence: deleting a built-in is temporary — it disappears from the list
+// until the next reload-all, which restores it. Deleted customs stay deleted.
+func (r *Registry) RestoreBuiltins() ([]string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var added []string
+
+	restored := map[string]bool{}
+	// Un-hide every previously-deleted default; GitHub owns the built-in set.
+	if len(r.hidden) > 0 {
+		for lower := range r.hidden {
+			restored[lower] = true
+		}
+		r.hidden = map[string]bool{}
+		if err := r.saveHiddenLocked(); err != nil {
+			return nil, err
+		}
+	}
+	// Ensure every manifest built-in is present (re-add the un-hidden ones and any
+	// newly-published upstream CDN). Existing records are left as-is; ReloadAll
+	// refreshes their ranges.
 	for _, entry := range providers.Entries() {
 		lower := strings.ToLower(entry.Name)
 		r.builtinNames[lower] = true
-		if r.hidden[lower] {
-			continue // user deleted this default locally
-		}
 		if r.indexOf(entry.Name) >= 0 {
 			continue // already in the registry
 		}
@@ -109,9 +126,15 @@ func (r *Registry) SyncBuiltins() ([]string, error) {
 			rec.CIDRs = rf.CIDRs
 		}
 		r.recs = append(r.recs, rec)
-		added = append(added, entry.Name)
+		restored[lower] = true
 	}
-	return added, nil
+
+	out := make([]string, 0, len(restored))
+	for name := range restored {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // List returns a copy of all stored targets, built-ins first then customs, each

@@ -197,13 +197,14 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // best-effort; empty body = no backup pref
 
-	// Reload-all is an explicit user action, so first re-fetch the manifest to
-	// surface any built-in CDNs published upstream since launch (e.g. a newly
-	// added "vercel") without requiring a restart. Best-effort: a manifest hiccup
-	// must not block reloading the ranges we already have. The manifest + range
-	// fetches use GitHub raw first (always current), so a just-pushed edit is seen
-	// now rather than waiting on jsDelivr's branch cache.
-	added, err := s.svc.RefreshManifest(r.Context())
+	// Reload-all is an explicit user action and GitHub owns the built-in set, so
+	// first re-fetch the manifest and force-restore the built-ins: any default the
+	// user deleted comes back, and CDNs published upstream since launch (e.g. a new
+	// "arvan") surface — all without a restart. Custom targets are untouched.
+	// Best-effort: a manifest hiccup must not block reloading the ranges we already
+	// have. The manifest + range fetches use GitHub raw first (always current), so a
+	// just-pushed edit is seen now rather than waiting on jsDelivr's branch cache.
+	restored, err := s.svc.RefreshManifest(r.Context())
 	if err != nil {
 		log.Printf("reload-all: manifest refresh failed (%v); reloading existing targets only", err)
 	}
@@ -218,7 +219,7 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 			reloaded++
 		}
 	}
-	writeJSON(w, map[string]any{"reloaded": reloaded, "failed": failed, "added": added, "results": results})
+	writeJSON(w, map[string]any{"reloaded": reloaded, "failed": failed, "restored": restored, "results": results})
 }
 
 type customReq struct {
