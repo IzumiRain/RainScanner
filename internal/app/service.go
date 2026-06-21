@@ -85,7 +85,10 @@ func (s *Service) ReloadAll(ctx context.Context, opts providers.FetchOptions) []
 	client := &http.Client{Timeout: 30 * time.Second}
 	var out []ReloadResult
 	for _, rec := range s.reg.List() {
-		if rec.APIURL == "" {
+		// Skip only custom targets with no feed. Built-ins are always reloadable
+		// (official API, or the GitHub mirror — including manual CDNs like railway
+		// whose ranges live only in inside-api/<name>.json).
+		if rec.APIURL == "" && !rec.Builtin {
 			continue
 		}
 		res := ReloadResult{Name: rec.Name}

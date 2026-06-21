@@ -25,10 +25,14 @@ type CustomTarget struct {
 	Builtin bool     `json:"builtin"`
 }
 
-// customFile is the on-disk shape of ips/custom.json.
+// customFile is the on-disk shape of ips/custom.json. Hidden is the list of
+// built-in CDN names the user has deleted locally; it is kept here (rather than
+// a separate file) so all user-local target state lives in one place. Hidden is
+// omitempty so a custom.json with no deletions is byte-identical to before.
 type customFile struct {
 	UpdatedAt string         `json:"updated_at"`
 	Targets   []CustomTarget `json:"targets"`
+	Hidden    []string       `json:"hidden,omitempty"`
 }
 
 // Store abstracts all of RainScanner's persistence.
@@ -40,8 +44,13 @@ type Store interface {
 	// LoadCustoms returns all user custom targets (ips/custom.json); a missing
 	// file yields (nil, nil).
 	LoadCustoms() ([]CustomTarget, error)
-	// SaveCustoms rewrites ips/custom.json.
+	// SaveCustoms rewrites ips/custom.json (preserving the hidden list).
 	SaveCustoms(customs []CustomTarget) error
+	// LoadHidden returns the names of built-in CDNs the user has deleted; a
+	// missing file yields (nil, nil).
+	LoadHidden() ([]string, error)
+	// SaveHidden rewrites the hidden built-in list (preserving custom targets).
+	SaveHidden(hidden []string) error
 	// Results returns the saved results for a target (results/<cdn>.json).
 	Results(cdn string) (*output.ResultFile, error)
 	// SaveResults writes results/<cdn>.json and returns the path.
@@ -72,31 +81,61 @@ func (f *FileStore) SaveRanges(rf *providers.RangeFile) error {
 	return providers.Save(f.ipsDir, rf)
 }
 
-func (f *FileStore) LoadCustoms() ([]CustomTarget, error) {
+// loadEnvelope reads ips/custom.json; a missing file yields a zero envelope.
+func (f *FileStore) loadEnvelope() (customFile, error) {
 	b, err := os.ReadFile(f.customPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return customFile{}, nil
 		}
-		return nil, err
+		return customFile{}, err
 	}
 	var cf customFile
 	if err := json.Unmarshal(b, &cf); err != nil {
-		return nil, fmt.Errorf("%s: parse: %w", f.customPath, err)
+		return customFile{}, fmt.Errorf("%s: parse: %w", f.customPath, err)
 	}
-	return cf.Targets, nil
+	return cf, nil
 }
 
-func (f *FileStore) SaveCustoms(customs []CustomTarget) error {
+// saveEnvelope rewrites ips/custom.json with a fresh timestamp.
+func (f *FileStore) saveEnvelope(cf customFile) error {
 	if err := os.MkdirAll(f.ipsDir, 0o755); err != nil {
 		return err
 	}
-	cf := customFile{UpdatedAt: time.Now().UTC().Format(time.RFC3339), Targets: customs}
+	cf.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	b, err := json.MarshalIndent(cf, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(f.customPath, b, 0o644)
+}
+
+func (f *FileStore) LoadCustoms() ([]CustomTarget, error) {
+	cf, err := f.loadEnvelope()
+	return cf.Targets, err
+}
+
+func (f *FileStore) SaveCustoms(customs []CustomTarget) error {
+	cf, err := f.loadEnvelope()
+	if err != nil {
+		return err
+	}
+	cf.Targets = customs
+	return f.saveEnvelope(cf)
+}
+
+func (f *FileStore) LoadHidden() ([]string, error) {
+	cf, err := f.loadEnvelope()
+	return cf.Hidden, err
+}
+
+func (f *FileStore) SaveHidden(hidden []string) error {
+	cf, err := f.loadEnvelope()
+	if err != nil {
+		return err
+	}
+	cf.Hidden = hidden
+	return f.saveEnvelope(cf)
 }
 
 func (f *FileStore) Results(cdn string) (*output.ResultFile, error) {

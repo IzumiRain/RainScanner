@@ -43,23 +43,37 @@ type Record struct {
 type Registry struct {
 	store        storage.Store
 	builtinNames map[string]bool // names seeded from the active manifest
+	hidden       map[string]bool // built-in names the user deleted locally
 
 	mu   sync.Mutex
 	recs []Record
 }
 
 // Open builds a Registry: built-in CDNs seeded from the active manifest (with
-// cached ranges from the store), then user customs loaded from the store.
+// cached ranges from the store), minus any the user has deleted, then user
+// customs loaded from the store.
 func Open(store storage.Store) (*Registry, error) {
-	r := &Registry{store: store, builtinNames: map[string]bool{}}
+	r := &Registry{store: store, builtinNames: map[string]bool{}, hidden: map[string]bool{}}
+
+	hidden, err := store.LoadHidden()
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range hidden {
+		r.hidden[strings.ToLower(name)] = true
+	}
 
 	for _, entry := range providers.Entries() {
+		lower := strings.ToLower(entry.Name)
+		r.builtinNames[lower] = true
+		if r.hidden[lower] {
+			continue // user deleted this default; don't re-seed it
+		}
 		rec := Record{Name: entry.Name, Builtin: true, APIURL: entry.APIURL}
 		if rf, err := store.Ranges(entry.Name); err == nil {
 			rec.CIDRs = rf.CIDRs
 		}
 		r.recs = append(r.recs, rec)
-		r.builtinNames[strings.ToLower(entry.Name)] = true
 	}
 
 	customs, err := store.LoadCustoms()
@@ -115,8 +129,18 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	isBuiltin := r.builtinNames[strings.ToLower(rec.Name)]
+	lower := strings.ToLower(rec.Name)
+	isBuiltin := r.builtinNames[lower]
 	rec.Builtin = isBuiltin
+
+	// Re-adding a previously-deleted built-in un-hides it so it sticks across
+	// restarts (otherwise Open would skip it again).
+	if isBuiltin && r.hidden[lower] {
+		delete(r.hidden, lower)
+		if err := r.saveHiddenLocked(); err != nil {
+			return Record{}, err
+		}
+	}
 
 	if i := r.indexOf(rec.Name); i >= 0 {
 		// Preserve the canonical name's existing casing/flag for built-ins.
@@ -136,10 +160,11 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	return rec, nil
 }
 
-// Delete removes a CUSTOM target by name and rewrites custom.json. Built-in CDNs
-// are part of the shipped defaults and are not removable; attempting to delete
-// one is a no-op that returns removed=false (with no error) so the GUI can treat
-// it gracefully. Returns whether a record was actually removed.
+// Delete removes a target by name. A custom target is dropped from custom.json.
+// A built-in CDN is "hidden": removed from the live list and recorded in the
+// persisted hidden set so it does not reappear when the manifest is re-seeded on
+// the next start. (Re-adding it by name via Upsert un-hides it.) Returns whether
+// a record was actually removed.
 func (r *Registry) Delete(name string) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -147,10 +172,15 @@ func (r *Registry) Delete(name string) (bool, error) {
 	if i < 0 {
 		return false, nil
 	}
-	if r.recs[i].Builtin {
-		return false, nil // defaults are not deletable
-	}
+	wasBuiltin := r.recs[i].Builtin
 	r.recs = append(r.recs[:i], r.recs[i+1:]...)
+	if wasBuiltin {
+		r.hidden[strings.ToLower(name)] = true
+		if err := r.saveHiddenLocked(); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
 	if err := r.saveCustomsLocked(); err != nil {
 		return false, err
 	}
@@ -173,19 +203,18 @@ func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts
 	if entry, isBuiltin := providers.GetEntry(name); isBuiltin && rec.APIURL == entry.APIURL {
 		// Unmodified built-in feed: use full FetchRanges (official→backup per opts).
 		cidrs, _, err = providers.FetchRanges(ctx, c, entry, opts)
-		if err == nil {
-			cidrs = iprange.FilterV4(cidrs)
-		}
 	} else {
-		// Custom target or user-overridden API URL: generic scrape.
+		// Custom target or user-overridden API URL: JSON-aware fetch (accepts a
+		// RangeFile JSON, a bare JSON array, or a plain-text feed).
 		if strings.TrimSpace(rec.APIURL) == "" {
 			return Record{}, fmt.Errorf("%s has no API URL to reload from", name)
 		}
-		cidrs, err = providers.ScrapeCIDRs(ctx, c, rec.APIURL)
+		cidrs, err = providers.FetchCIDRs(ctx, c, rec.APIURL)
 	}
 	if err != nil {
 		return Record{}, err
 	}
+	cidrs = iprange.FilterV4(cidrs)
 	sort.Strings(cidrs)
 	rec.CIDRs = cidrs
 	return r.Upsert(rec)
@@ -225,4 +254,14 @@ func (r *Registry) saveCustomsLocked() error {
 		}
 	}
 	return r.store.SaveCustoms(customs)
+}
+
+// saveHiddenLocked persists the set of deleted built-in names. Caller holds mu.
+func (r *Registry) saveHiddenLocked() error {
+	names := make([]string, 0, len(r.hidden))
+	for name := range r.hidden {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return r.store.SaveHidden(names)
 }

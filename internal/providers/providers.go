@@ -305,10 +305,68 @@ func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, err
 	if err != nil {
 		return nil, err
 	}
+	out := scrapeCIDRBytes(b)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no IPv4 ranges found at %s", url)
+	}
+	return out, nil
+}
+
+// FetchCIDRs retrieves a CIDR list from url, accepting (in priority order):
+//  1. a RangeFile JSON object — {"cidrs":["1.2.3.0/24", ...]} (the same shape
+//     RainScanner writes, so a custom CDN can host its list exactly like
+//     inside-api/<cdn>.json);
+//  2. a bare JSON array of strings — ["1.2.3.0/24", ...];
+//  3. any other text blob — regex-scraped for IPv4 CIDRs (plain-text feeds).
+//
+// This is what the GUI "reload" uses for a custom target or a built-in whose
+// API URL the user overrode, so pointing a CDN at a GitHub-hosted JSON file
+// works without the user having to match a specific text layout. Results are
+// IPv4-only, de-duplicated, and sorted.
+func FetchCIDRs(ctx context.Context, c *http.Client, url string) ([]string, error) {
+	b, err := httpGet(ctx, c, url)
+	if err != nil {
+		return nil, err
+	}
+	// 1. RangeFile JSON ({"cidrs":[...]}). Any JSON object unmarshals here, so
+	//    we only accept it when it actually carried a non-empty cidrs array.
+	var rf RangeFile
+	if json.Unmarshal(b, &rf) == nil && len(rf.CIDRs) > 0 {
+		if out := normalizeCIDRs(rf.CIDRs); len(out) > 0 {
+			return out, nil
+		}
+	}
+	// 2. Bare JSON array of CIDR strings.
+	var arr []string
+	if json.Unmarshal(b, &arr) == nil && len(arr) > 0 {
+		if out := normalizeCIDRs(arr); len(out) > 0 {
+			return out, nil
+		}
+	}
+	// 3. Regex scrape (plain-text or anything else).
+	out := scrapeCIDRBytes(b)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no IPv4 ranges found at %s", url)
+	}
+	return out, nil
+}
+
+// scrapeCIDRBytes regex-extracts every valid IPv4 CIDR / bare IP from b. Bare
+// IPs are normalised to /32; results are de-duplicated and sorted.
+func scrapeCIDRBytes(b []byte) []string {
+	return normalizeCIDRs(cidrRe.FindAllString(string(b), -1))
+}
+
+// normalizeCIDRs validates, masks, de-duplicates, and sorts a list of CIDR /
+// bare-IP strings, keeping IPv4 only. Bare IPs become /32.
+func normalizeCIDRs(in []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
-	for _, m := range cidrRe.FindAllString(string(b), -1) {
-		cidr := m
+	for _, m := range in {
+		cidr := strings.TrimSpace(m)
+		if cidr == "" {
+			continue
+		}
 		if !strings.Contains(cidr, "/") {
 			cidr += "/32"
 		}
@@ -323,11 +381,8 @@ func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, err
 		seen[norm] = struct{}{}
 		out = append(out, norm)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("no IPv4 ranges found at %s", url)
-	}
 	sort.Strings(out)
-	return out, nil
+	return out
 }
 
 func fetchAWSCloudFront(ctx context.Context, c *http.Client, url string) ([]string, error) {
