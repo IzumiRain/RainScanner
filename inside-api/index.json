@@ -30,6 +30,11 @@
       "name": "vercel",
       "api": "",
       "parser": "manual"
+    },
+    {
+      "name": "gcore",
+      "api": "https://api.gcore.com/cdn/public-net-list",
+      "parser": "scrape"
     }
   ]
 }
