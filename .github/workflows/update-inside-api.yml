@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: v2.0.0
+          ref: main
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26'
@@ -26,4 +26,4 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add inside-api/
           git diff --cached --quiet || git commit -m "PreUpdate: refresh inside-api CDN range mirror [skip ci]"
-          git push origin v2.0.0
+          git push origin main
