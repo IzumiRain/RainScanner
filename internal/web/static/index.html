@@ -98,6 +98,16 @@ body.drawer-open #scrim{opacity:1;pointer-events:auto}
 .sec-title{display:flex;align-items:center;justify-content:space-between;
   font-size:10px;text-transform:uppercase;letter-spacing:.08em;
   color:var(--muted);margin:0 0 10px;font-weight:700}
+.sec-actions{display:flex;align-items:center;gap:7px}
+/* segmented source switch (github / official api) beside the reload button */
+.src-switch{display:inline-flex;height:22px;border:1px solid var(--border-hi);
+  border-radius:7px;overflow:hidden;background:rgba(10,9,28,.55)}
+.src-opt{appearance:none;border:0;background:transparent;cursor:pointer;
+  font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:800;
+  text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
+  padding:0 8px;transition:background .2s,color .2s}
+.src-opt:not(.on):hover{color:#cdb3ff;background:rgba(124,108,255,.12)}
+.src-opt.on{background:var(--grad);color:#fff}
 .reload-all{flex:none;display:inline-flex;align-items:center;justify-content:center;
   width:22px;height:22px;padding:0;border:1px solid var(--border-hi);border-radius:7px;
   background:rgba(124,108,255,.1);color:#cdb3ff;font-size:13px;cursor:pointer;
@@ -388,7 +398,14 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
       <div class="sidebar-scroll">
         <div class="sec-title">
           <span>Targets</span>
-          <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs from their sources"><span class="ra-ic">⟳</span></button>
+          <div class="sec-actions">
+            <div class="src-switch" title="Range source for reload/scan — GitHub: jsDelivr / GitHub raw mirror (use if a CDN API is blocked in your region). Official: each CDN's own API.">
+              <button type="button" class="src-opt" data-bk="1">github</button>
+              <button type="button" class="src-opt on" data-bk="0">official api</button>
+            </div>
+            <input type="checkbox" id="prefer_backup" hidden />
+            <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs from their sources"><span class="ra-ic">⟳</span></button>
+          </div>
         </div>
         <div class="cdns" id="cdns"></div>
         <div class="addcustom" id="addcustom">+ Add custom</div>
@@ -410,8 +427,6 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
               <div class="gh"><span>⚡</span> Performance</div>
               <label class="switch"><input type="checkbox" id="lite" /><span class="track"></span>Lite mode (low-power — caps load on weak PCs)</label>
               <div class="hint">Hard-caps concurrency (2 xray / 100 TCP). Leave blank for auto (CPU-scaled).</div>
-              <label class="switch"><input type="checkbox" id="prefer_backup" /><span class="track"></span>Prefer backup source (sanctioned networks)</label>
-              <div class="hint">Try jsDelivr / GitHub raw mirror before the CDN's official API. Use if Fastly or other CDN APIs are blocked in your region.</div>
               <div class="row">
                 <div><label>TCP concurrency</label><input type="number" id="tcpc" placeholder="auto" /></div>
                 <div><label>Xray procs</label><input type="number" id="xrayc" placeholder="auto" /></div>
@@ -847,6 +862,15 @@ $('cDelete').onclick=deleteTarget;
 $('cReload').onclick=reloadRanges;
 $('reloadAll').onclick=reloadAllCdns;
 $('cRanges').oninput=countRanges;
+
+// Source switch: github (data-bk=1) vs official api (data-bk=0). Drives the
+// hidden #prefer_backup checkbox that the reload/scan requests already read.
+document.querySelectorAll('.src-opt').forEach(btn=>{
+  btn.onclick=()=>{
+    $('prefer_backup').checked = btn.dataset.bk === '1';
+    document.querySelectorAll('.src-opt').forEach(b=>b.classList.toggle('on', b===btn));
+  };
+});
 $('overlay').onclick=e=>{ if(e.target===$('overlay')) closeModal(); };
 
 // Lite mode dims manual concurrency fields

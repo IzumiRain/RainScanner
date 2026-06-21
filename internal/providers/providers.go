@@ -139,9 +139,12 @@ func APIURL(name string) string {
 
 // ── Manifest loading ──────────────────────────────────────────────────────────
 
+// The inside-api/ mirror currently lives on the v2.0.0 branch (main is still the
+// released v1.x line). Switch these back to @main / /main/ when v2.0.0 merges to
+// main so released builds read the canonical branch.
 const (
-	jsdelivrBase = "https://cdn.jsdelivr.net/gh/IzumiRain/RainScanner@main/inside-api/"
-	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/main/inside-api/"
+	jsdelivrBase = "https://cdn.jsdelivr.net/gh/IzumiRain/RainScanner@v2.0.0/inside-api/"
+	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/v2.0.0/inside-api/"
 )
 
 // LoadManifest fetches the manifest from jsDelivr → GitHub raw → local cache.
