@@ -42,12 +42,8 @@ type ManifestIndex struct {
 // FetchOptions controls which sources FetchRanges tries and in what order.
 // Zero value = normal order: official first, backup allowed.
 type FetchOptions struct {
-	PreferBackup bool // try backup (jsDelivr→raw) before official API
+	PreferBackup bool // try backup (GitHub raw→jsDelivr) before official API
 	NoBackup     bool // skip backup entirely; official only (overrides PreferBackup)
-	// PreferFresh flips the GitHub-mirror order to raw → jsDelivr. Set it for an
-	// explicit user reload: GitHub raw is always current, while jsDelivr caches a
-	// branch path for up to ~12h, so a just-pushed edit is seen immediately.
-	PreferFresh bool
 }
 
 // ── RangeFile ────────────────────────────────────────────────────────────────
@@ -156,15 +152,12 @@ const (
 // refreshed. Returns an empty non-nil index if all sources fail but no error so
 // callers can start with zero CDNs rather than crashing.
 //
-// preferFresh flips the source order to GitHub raw → jsDelivr (use it for an
-// explicit refresh so a just-pushed manifest is seen now, not up to ~12h later
-// when jsDelivr's branch cache expires). Startup uses jsDelivr → raw for the
-// best reachability on restricted networks.
-func LoadManifest(ctx context.Context, c *http.Client, ipsDir string, preferFresh bool) (*ManifestIndex, error) {
-	urls := []string{jsdelivrBase + "index.json", githubBase + "index.json"}
-	if preferFresh {
-		urls = []string{githubBase + "index.json", jsdelivrBase + "index.json"}
-	}
+// Source order is GitHub raw → jsDelivr. raw is always current and (unlike
+// jsDelivr) resolves the v2.0.0 *branch* — jsDelivr reads "@v2.0.0" as a version
+// tag, which doesn't exist, so it 404s until v2 merges to main. jsDelivr stays
+// as a fallback for networks where raw.githubusercontent.com is blocked.
+func LoadManifest(ctx context.Context, c *http.Client, ipsDir string) (*ManifestIndex, error) {
+	urls := []string{githubBase + "index.json", jsdelivrBase + "index.json"}
 	for _, url := range urls {
 		if m, err := fetchManifestFrom(ctx, c, url); err == nil {
 			_ = saveLocalManifest(ipsDir, m) // best-effort cache refresh
@@ -221,7 +214,7 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 		return cidrs, "official", err
 	}
 	backup := func() ([]string, string, error) {
-		return fetchBackupFile(ctx, c, entry.Name, opts.PreferFresh)
+		return fetchBackupFile(ctx, c, entry.Name)
 	}
 
 	// manual parser: never call official; backup-only.
@@ -262,22 +255,19 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 }
 
 // fetchBackupFile fetches inside-api/<name>.json from the GitHub mirror. Order
-// is jsDelivr → GitHub raw, or raw → jsDelivr when preferFresh (so a just-pushed
-// edit isn't masked by jsDelivr's branch cache). It prefers the structured
-// RangeFile JSON but tolerates a hand-edited file with a JSON typo by
-// regex-scraping the IPv4 CIDRs out of it (a single bad comma should not nuke
-// the whole CDN).
-func fetchBackupFile(ctx context.Context, c *http.Client, name string, preferFresh bool) ([]string, string, error) {
+// is GitHub raw → jsDelivr: raw is always current and resolves the v2.0.0 branch
+// (jsDelivr 404s on it), with jsDelivr kept as a fallback for raw-blocked
+// networks. It prefers the structured RangeFile JSON but tolerates a hand-edited
+// file with a JSON typo by regex-scraping the IPv4 CIDRs out of it (a single bad
+// comma should not nuke the whole CDN).
+func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string, string, error) {
 	type candidate struct {
 		url    string
 		source string
 	}
 	cands := []candidate{
-		{jsdelivrBase + name + ".json", "jsdelivr"},
 		{githubBase + name + ".json", "github-raw"},
-	}
-	if preferFresh {
-		cands[0], cands[1] = cands[1], cands[0]
+		{jsdelivrBase + name + ".json", "jsdelivr"},
 	}
 	for _, cand := range cands {
 		b, err := httpGet(ctx, c, cand.url)

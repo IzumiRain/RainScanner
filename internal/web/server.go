@@ -174,9 +174,7 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	// Explicit user reload: PreferFresh uses GitHub raw before jsDelivr so a
-	// just-pushed range edit is seen now, not up to ~12h later.
-	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{PreferBackup: req.PreferBackup, PreferFresh: true})
+	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{PreferBackup: req.PreferBackup})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -202,15 +200,15 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 	// Reload-all is an explicit user action, so first re-fetch the manifest to
 	// surface any built-in CDNs published upstream since launch (e.g. a newly
 	// added "vercel") without requiring a restart. Best-effort: a manifest hiccup
-	// must not block reloading the ranges we already have. PreferFresh makes the
-	// fetch use GitHub raw before jsDelivr so a just-pushed edit isn't masked by
-	// jsDelivr's branch cache.
+	// must not block reloading the ranges we already have. The manifest + range
+	// fetches use GitHub raw first (always current), so a just-pushed edit is seen
+	// now rather than waiting on jsDelivr's branch cache.
 	added, err := s.svc.RefreshManifest(r.Context())
 	if err != nil {
 		log.Printf("reload-all: manifest refresh failed (%v); reloading existing targets only", err)
 	}
 
-	opts := providers.FetchOptions{PreferBackup: req.PreferBackup, PreferFresh: true}
+	opts := providers.FetchOptions{PreferBackup: req.PreferBackup}
 	results := s.svc.ReloadAll(r.Context(), opts)
 	reloaded, failed := 0, 0
 	for _, rr := range results {

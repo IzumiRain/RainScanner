@@ -116,7 +116,7 @@ func main() {
 	// Use a fresh client with a short timeout; -serve mode re-loads in app.New().
 	if !*serve {
 		mctx, mcancel := context.WithTimeout(context.Background(), 8*time.Second)
-		m, merr := providers.LoadManifest(mctx, &http.Client{Timeout: 8 * time.Second}, *ipsDir, false)
+		m, merr := providers.LoadManifest(mctx, &http.Client{Timeout: 8 * time.Second}, *ipsDir)
 		mcancel()
 		if merr != nil {
 			log.Printf("warning: CDN manifest unavailable (%v); only cached ranges will work", merr)

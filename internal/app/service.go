@@ -40,7 +40,7 @@ func New(store storage.Store, ipsDir, resultsDir string) (*Service, error) {
 		// Load the CDN manifest (best-effort; uses local cache on network failure).
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		manifest, err := providers.LoadManifest(ctx, &http.Client{Timeout: 8 * time.Second}, ipsDir, false)
+		manifest, err := providers.LoadManifest(ctx, &http.Client{Timeout: 8 * time.Second}, ipsDir)
 		if err != nil {
 			log.Printf("warning: could not load CDN manifest (%v); defaults unavailable until network restored", err)
 			manifest = &providers.ManifestIndex{}
@@ -72,13 +72,13 @@ func (s *Service) Reload(ctx context.Context, name string, opts providers.FetchO
 	return s.reg.Reload(ctx, &http.Client{Timeout: 30 * time.Second}, name, opts)
 }
 
-// RefreshManifest re-fetches the CDN manifest (preferring the freshest GitHub
-// source) and surfaces any newly-published built-in CDNs into the registry
-// without a restart. It is additive: existing edits and local deletions survive.
-// Returns the names of CDNs newly added. Best-effort: a manifest fetch failure
-// leaves the current set in place and returns the error.
+// RefreshManifest re-fetches the CDN manifest (GitHub raw → jsDelivr) and
+// surfaces any newly-published built-in CDNs into the registry without a restart.
+// It is additive: existing edits and local deletions survive. Returns the names
+// of CDNs newly added. Best-effort: a manifest fetch failure leaves the current
+// set in place and returns the error.
 func (s *Service) RefreshManifest(ctx context.Context) ([]string, error) {
-	m, err := providers.LoadManifest(ctx, &http.Client{Timeout: 15 * time.Second}, s.ipsDir, true)
+	m, err := providers.LoadManifest(ctx, &http.Client{Timeout: 15 * time.Second}, s.ipsDir)
 	if err != nil {
 		return nil, err
 	}
