@@ -139,12 +139,12 @@ func APIURL(name string) string {
 
 // ── Manifest loading ──────────────────────────────────────────────────────────
 
-// The inside-api/ mirror currently lives on the v2.0.0 branch (main is still the
-// released v1.x line). Switch these back to @main / /main/ when v2.0.0 merges to
-// main so released builds read the canonical branch.
+// inside-api/ lives on main; GitHub raw resolves main instantly on every push.
+// jsDelivr is kept as a fallback for networks where raw.githubusercontent.com is
+// blocked (jsDelivr caches main with a short TTL).
 const (
-	jsdelivrBase = "https://cdn.jsdelivr.net/gh/IzumiRain/RainScanner@v2.0.0/inside-api/"
-	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/v2.0.0/inside-api/"
+	jsdelivrBase = "https://cdn.jsdelivr.net/gh/IzumiRain/RainScanner@main/inside-api/"
+	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/main/inside-api/"
 )
 
 // LoadManifest fetches the manifest from the GitHub mirror, then the local
@@ -152,10 +152,8 @@ const (
 // refreshed. Returns an empty non-nil index if all sources fail but no error so
 // callers can start with zero CDNs rather than crashing.
 //
-// Source order is GitHub raw → jsDelivr. raw is always current and (unlike
-// jsDelivr) resolves the v2.0.0 *branch* — jsDelivr reads "@v2.0.0" as a version
-// tag, which doesn't exist, so it 404s until v2 merges to main. jsDelivr stays
-// as a fallback for networks where raw.githubusercontent.com is blocked.
+// Source order is GitHub raw → jsDelivr. raw is always current on the main
+// branch; jsDelivr is a fallback for networks where raw is blocked.
 func LoadManifest(ctx context.Context, c *http.Client, ipsDir string) (*ManifestIndex, error) {
 	urls := []string{githubBase + "index.json", jsdelivrBase + "index.json"}
 	for _, url := range urls {
@@ -255,8 +253,7 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 }
 
 // fetchBackupFile fetches inside-api/<name>.json from the GitHub mirror. Order
-// is GitHub raw → jsDelivr: raw is always current and resolves the v2.0.0 branch
-// (jsDelivr 404s on it), with jsDelivr kept as a fallback for raw-blocked
+// is GitHub raw → jsDelivr: raw serves main instantly; jsDelivr is a fallback for raw-blocked
 // networks. It prefers the structured RangeFile JSON but tolerates a hand-edited
 // file with a JSON typo by regex-scraping the IPv4 CIDRs out of it (a single bad
 // comma should not nuke the whole CDN).
