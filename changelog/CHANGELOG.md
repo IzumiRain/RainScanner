@@ -5,6 +5,23 @@ Written by Claude (Anthropic).
 
 ---
 
+## v2.0.1 — 2026-06-21
+
+### Added
+- **Gcore CDN** — new built-in (`gcore`). 349 edge network ranges, fetched from
+  `https://api.gcore.com/cdn/public-net-list`.
+
+### Fixed
+- **⟳ reload all no longer ignores newly added CDNs.** The manifest was fetched
+  from the `v2.0.0` git ref, which resolved to the release *tag* (a frozen
+  snapshot). Adding a CDN to `inside-api/index.json` had no effect until app
+  restart. The source URL now points to `main`, so reload-all always reads the
+  live manifest.
+- **Daily range-refresh workflow** now checks out and commits to `main` instead
+  of the deleted `v2.0.0` branch.
+
+---
+
 ## v2.0.0 — 2026-06-21
 
 A ground-up overhaul of how targets are managed and how the app is built, plus a
