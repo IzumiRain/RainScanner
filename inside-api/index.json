@@ -25,6 +25,11 @@
       "name": "railway",
       "api": "",
       "parser": "manual"
+    },
+    {
+      "name": "vercel",
+      "api": "",
+      "parser": "manual"
     }
   ]
 }
