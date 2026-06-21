@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"net"
 	"net/http"
 	"strconv"
@@ -173,7 +174,9 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{PreferBackup: req.PreferBackup})
+	// Explicit user reload: PreferFresh uses GitHub raw before jsDelivr so a
+	// just-pushed range edit is seen now, not up to ~12h later.
+	rec, err := s.svc.Reload(r.Context(), req.Name, providers.FetchOptions{PreferBackup: req.PreferBackup, PreferFresh: true})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -195,7 +198,19 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 		PreferBackup bool `json:"prefer_backup"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req) // best-effort; empty body = no backup pref
-	opts := providers.FetchOptions{PreferBackup: req.PreferBackup}
+
+	// Reload-all is an explicit user action, so first re-fetch the manifest to
+	// surface any built-in CDNs published upstream since launch (e.g. a newly
+	// added "vercel") without requiring a restart. Best-effort: a manifest hiccup
+	// must not block reloading the ranges we already have. PreferFresh makes the
+	// fetch use GitHub raw before jsDelivr so a just-pushed edit isn't masked by
+	// jsDelivr's branch cache.
+	added, err := s.svc.RefreshManifest(r.Context())
+	if err != nil {
+		log.Printf("reload-all: manifest refresh failed (%v); reloading existing targets only", err)
+	}
+
+	opts := providers.FetchOptions{PreferBackup: req.PreferBackup, PreferFresh: true}
 	results := s.svc.ReloadAll(r.Context(), opts)
 	reloaded, failed := 0, 0
 	for _, rr := range results {
@@ -205,7 +220,7 @@ func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 			reloaded++
 		}
 	}
-	writeJSON(w, map[string]any{"reloaded": reloaded, "failed": failed, "results": results})
+	writeJSON(w, map[string]any{"reloaded": reloaded, "failed": failed, "added": added, "results": results})
 }
 
 type customReq struct {

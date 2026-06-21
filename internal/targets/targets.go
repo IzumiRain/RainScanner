@@ -86,6 +86,34 @@ func Open(store storage.Store) (*Registry, error) {
 	return r, nil
 }
 
+// SyncBuiltins re-reads the active manifest and adds any newly-published
+// built-in CDNs that are not already present and not hidden. It is purely
+// additive: it never removes or overwrites an existing record, so user edits and
+// deletions survive. Call it after refreshing the manifest to surface CDNs added
+// upstream without a restart. Returns the names that were added.
+func (r *Registry) SyncBuiltins() ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var added []string
+	for _, entry := range providers.Entries() {
+		lower := strings.ToLower(entry.Name)
+		r.builtinNames[lower] = true
+		if r.hidden[lower] {
+			continue // user deleted this default locally
+		}
+		if r.indexOf(entry.Name) >= 0 {
+			continue // already in the registry
+		}
+		rec := Record{Name: entry.Name, Builtin: true, APIURL: entry.APIURL}
+		if rf, err := r.store.Ranges(entry.Name); err == nil {
+			rec.CIDRs = rf.CIDRs
+		}
+		r.recs = append(r.recs, rec)
+		added = append(added, entry.Name)
+	}
+	return added, nil
+}
+
 // List returns a copy of all stored targets, built-ins first then customs, each
 // group sorted by name. A copy is returned so callers can't mutate the store's
 // internal slice without going through Upsert/Delete.

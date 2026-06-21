@@ -44,6 +44,10 @@ type ManifestIndex struct {
 type FetchOptions struct {
 	PreferBackup bool // try backup (jsDelivr→raw) before official API
 	NoBackup     bool // skip backup entirely; official only (overrides PreferBackup)
+	// PreferFresh flips the GitHub-mirror order to raw → jsDelivr. Set it for an
+	// explicit user reload: GitHub raw is always current, while jsDelivr caches a
+	// branch path for up to ~12h, so a just-pushed edit is seen immediately.
+	PreferFresh bool
 }
 
 // ── RangeFile ────────────────────────────────────────────────────────────────
@@ -147,12 +151,21 @@ const (
 	githubBase   = "https://raw.githubusercontent.com/IzumiRain/RainScanner/v2.0.0/inside-api/"
 )
 
-// LoadManifest fetches the manifest from jsDelivr → GitHub raw → local cache.
-// On a successful remote fetch the local cache (ipsDir/index.json) is refreshed.
-// Returns an empty non-nil index if all sources fail but no error so callers
-// can start with zero CDNs rather than crashing.
-func LoadManifest(ctx context.Context, c *http.Client, ipsDir string) (*ManifestIndex, error) {
-	for _, url := range []string{jsdelivrBase + "index.json", githubBase + "index.json"} {
+// LoadManifest fetches the manifest from the GitHub mirror, then the local
+// cache. On a successful remote fetch the local cache (ipsDir/index.json) is
+// refreshed. Returns an empty non-nil index if all sources fail but no error so
+// callers can start with zero CDNs rather than crashing.
+//
+// preferFresh flips the source order to GitHub raw → jsDelivr (use it for an
+// explicit refresh so a just-pushed manifest is seen now, not up to ~12h later
+// when jsDelivr's branch cache expires). Startup uses jsDelivr → raw for the
+// best reachability on restricted networks.
+func LoadManifest(ctx context.Context, c *http.Client, ipsDir string, preferFresh bool) (*ManifestIndex, error) {
+	urls := []string{jsdelivrBase + "index.json", githubBase + "index.json"}
+	if preferFresh {
+		urls = []string{githubBase + "index.json", jsdelivrBase + "index.json"}
+	}
+	for _, url := range urls {
 		if m, err := fetchManifestFrom(ctx, c, url); err == nil {
 			_ = saveLocalManifest(ipsDir, m) // best-effort cache refresh
 			return m, nil
@@ -208,7 +221,7 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 		return cidrs, "official", err
 	}
 	backup := func() ([]string, string, error) {
-		return fetchBackupFile(ctx, c, entry.Name)
+		return fetchBackupFile(ctx, c, entry.Name, opts.PreferFresh)
 	}
 
 	// manual parser: never call official; backup-only.
@@ -248,28 +261,36 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 	return nil, "", fmt.Errorf("%s: all sources failed: %w", entry.Name, lastErr)
 }
 
-// fetchBackupFile tries jsDelivr then GitHub raw for inside-api/<name>.json.
-func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string, string, error) {
+// fetchBackupFile fetches inside-api/<name>.json from the GitHub mirror. Order
+// is jsDelivr → GitHub raw, or raw → jsDelivr when preferFresh (so a just-pushed
+// edit isn't masked by jsDelivr's branch cache). It prefers the structured
+// RangeFile JSON but tolerates a hand-edited file with a JSON typo by
+// regex-scraping the IPv4 CIDRs out of it (a single bad comma should not nuke
+// the whole CDN).
+func fetchBackupFile(ctx context.Context, c *http.Client, name string, preferFresh bool) ([]string, string, error) {
 	type candidate struct {
 		url    string
 		source string
 	}
-	for _, cand := range []candidate{
+	cands := []candidate{
 		{jsdelivrBase + name + ".json", "jsdelivr"},
 		{githubBase + name + ".json", "github-raw"},
-	} {
+	}
+	if preferFresh {
+		cands[0], cands[1] = cands[1], cands[0]
+	}
+	for _, cand := range cands {
 		b, err := httpGet(ctx, c, cand.url)
 		if err != nil {
 			continue
 		}
 		var rf RangeFile
-		if err := json.Unmarshal(b, &rf); err != nil {
-			continue
+		if json.Unmarshal(b, &rf) == nil && len(rf.CIDRs) > 0 {
+			return rf.CIDRs, cand.source, nil
 		}
-		if len(rf.CIDRs) == 0 {
-			continue
+		if scraped := scrapeCIDRBytes(b); len(scraped) > 0 {
+			return scraped, cand.source, nil
 		}
-		return rf.CIDRs, cand.source, nil
 	}
 	return nil, "", fmt.Errorf("backup unavailable for %s", name)
 }
