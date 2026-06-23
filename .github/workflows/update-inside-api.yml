@@ -25,5 +25,5 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add inside-api/
-          git diff --cached --quiet || git commit -m "PreUpdate: refresh inside-api CDN range mirror [skip ci]"
+          git diff --cached --quiet || git commit -m "Daily refresh inside-api CDN range mirror"
           git push origin main
