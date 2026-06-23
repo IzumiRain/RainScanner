@@ -25,10 +25,10 @@ IPv4-only. IPv6 ranges are dropped.
 
 ## 🌐 Supported CDNs
 
-Seven built-in defaults: `cloudflare`, `fastly`, `cloudfront` (AWS CloudFront),
-`arvan` (ArvanCloud), `Gcore`, `railway`, and `vercel`.
+Seven built-in defaults: `cloudflare`, `fastly`, `Gcore`, `cloudfront` (AWS CloudFront),
+`arvan` (ArvanCloud), `railway`, and `vercel`.
 
-- The first four pull their official published ranges automatically and cache them
+- The first five pull their official published ranges automatically and cache them
   as `ips/<cdn>.json`. `railway` and `vercel` have no public range API, so their
   ranges ship with the repo and are maintained manually.
 - **Edit any built-in** (its ranges or API URL) or **delete** ones you don't use,
