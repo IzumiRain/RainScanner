@@ -29,8 +29,8 @@ ICMP) مرتب می‌کند. دو مرحله دارد:
 
 ## 🌐 CDNهای پشتیبانی‌شده
 
-شش CDN پیش‌فرض: `cloudflare`، `fastly`، `cloudfront` (آمازون کلودفرانت)،
-`arvan` (ابرآروان)، `railway` و `vercel`.
+هفت CDN پیش‌فرض: `cloudflare`، `fastly`، `cloudfront` (آمازون کلودفرانت)،
+`arvan` (ابرآروان)، `Gcore`، `railway` و `vercel`.
 
 - چهار مورد نخست، محدوده‌های رسمیِ منتشرشده‌ی خود را خودکار می‌گیرند و در
   `ips/<cdn>.json` کش می‌کنند. `railway` و `vercel` API عمومی برای محدوده‌ها ندارند،
