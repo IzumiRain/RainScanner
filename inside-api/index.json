@@ -4,6 +4,7 @@
     {
       "name": "cloudflare",
       "api": "https://www.cloudflare.com/ips-v4",
+      "api_v6": "https://www.cloudflare.com/ips-v6",
       "parser": "scrape"
     },
     {

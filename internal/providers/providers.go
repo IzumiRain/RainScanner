@@ -30,7 +30,12 @@ import (
 type ManifestEntry struct {
 	Name   string `json:"name"`
 	APIURL string `json:"api"`
-	Parser string `json:"parser"` // "scrape" | "aws-cloudfront" | "manual"
+	// APIURLv6 is an optional second feed carrying the CDN's IPv6 prefixes.
+	// Some providers publish both families in one document (Fastly, Gcore, AWS);
+	// others split them across two URLs (Cloudflare's ips-v4 / ips-v6). When set,
+	// both feeds are fetched and merged. Absent = the single feed has everything.
+	APIURLv6 string `json:"api_v6,omitempty"`
+	Parser   string `json:"parser"` // "scrape" | "aws-cloudfront" | "manual"
 }
 
 // ManifestIndex is the root of inside-api/index.json.
@@ -255,7 +260,7 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 // fetchBackupFile fetches inside-api/<name>.json from the GitHub mirror. Order
 // is GitHub raw → jsDelivr: raw serves main instantly; jsDelivr is a fallback for raw-blocked
 // networks. It prefers the structured RangeFile JSON but tolerates a hand-edited
-// file with a JSON typo by regex-scraping the IPv4 CIDRs out of it (a single bad
+// file with a JSON typo by regex-scraping the CIDRs out of it (a single bad
 // comma should not nuke the whole CDN).
 func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string, string, error) {
 	type candidate struct {
@@ -290,7 +295,7 @@ func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string
 func runParser(ctx context.Context, c *http.Client, entry ManifestEntry) ([]string, error) {
 	switch entry.Parser {
 	case "scrape":
-		return ScrapeCIDRs(ctx, c, entry.APIURL)
+		return scrapeBothFamilies(ctx, c, entry)
 	case "aws-cloudfront":
 		return fetchAWSCloudFront(ctx, c, entry.APIURL)
 	case "manual":
@@ -301,13 +306,50 @@ func runParser(ctx context.Context, c *http.Client, entry ManifestEntry) ([]stri
 	}
 }
 
+// scrapeBothFamilies scrapes the entry's primary feed plus, when the manifest
+// names one, its separate IPv6 feed, and merges the two lists. A provider that
+// splits the families across two URLs (Cloudflare) therefore yields a dual-stack
+// range set, while one that publishes both in a single document (Fastly, Gcore)
+// needs no extra URL — the scraper already picks up both.
+//
+// The two feeds fail independently: whichever one answers is used. Only when
+// both fail is an error returned, so a provider that temporarily 500s its v6
+// endpoint still refreshes its v4 ranges instead of losing the whole target.
+func scrapeBothFamilies(ctx context.Context, c *http.Client, entry ManifestEntry) ([]string, error) {
+	primary, err := ScrapeCIDRs(ctx, c, entry.APIURL)
+	if entry.APIURLv6 == "" {
+		return primary, err
+	}
+	v6, v6err := ScrapeCIDRs(ctx, c, entry.APIURLv6)
+	switch {
+	case err != nil && v6err != nil:
+		return nil, err
+	case err != nil:
+		return v6, nil
+	case v6err != nil:
+		return primary, nil
+	}
+	return normalizeCIDRs(append(primary, v6...)), nil
+}
+
 // ── Shared fetch / cache helpers ──────────────────────────────────────────────
 
 // cidrRe matches an IPv4 CIDR or bare IPv4 address anywhere in text.
 var cidrRe = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?:/\d{1,2})?)\b`)
 
-// ScrapeCIDRs fetches url and extracts every valid IPv4 CIDR / bare IP.
-// Bare IPs are normalised to /32. Results are de-duplicated and sorted.
+// cidr6Re matches an IPv6 CIDR or bare IPv6 address anywhere in text. It is
+// deliberately loose — any run of hex groups joined by at least two colons, with
+// an optional prefix length — because the shapes that appear in provider feeds
+// vary ("2606:4700::/32", "2a04:4e42::/32", full 8-group addresses) and every
+// match is validated by netip afterwards. Over-matching therefore costs nothing,
+// while a stricter pattern would risk truncating a real prefix mid-address.
+// Colon-separated noise (timestamps, MAC addresses) survives the regex but fails
+// netip parsing and is dropped in normalizeCIDRs.
+var cidr6Re = regexp.MustCompile(`(?i)(?:[0-9a-f]{0,4}:){2,}[0-9a-f]{0,4}(?:/\d{1,3})?`)
+
+// ScrapeCIDRs fetches url and extracts every valid IPv4 / IPv6 CIDR or bare IP.
+// Bare IPs are normalised to /32 (v4) or /128 (v6). Results are de-duplicated
+// and sorted, IPv4 first.
 func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, error) {
 	b, err := httpGet(ctx, c, url)
 	if err != nil {
@@ -315,7 +357,7 @@ func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, err
 	}
 	out := scrapeCIDRBytes(b)
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no IPv4 ranges found at %s", url)
+		return nil, fmt.Errorf("no IP ranges found at %s", url)
 	}
 	return out, nil
 }
@@ -325,12 +367,12 @@ func ScrapeCIDRs(ctx context.Context, c *http.Client, url string) ([]string, err
 //     RainScanner writes, so a custom CDN can host its list exactly like
 //     inside-api/<cdn>.json);
 //  2. a bare JSON array of strings — ["1.2.3.0/24", ...];
-//  3. any other text blob — regex-scraped for IPv4 CIDRs (plain-text feeds).
+//  3. any other text blob — regex-scraped for CIDRs (plain-text feeds).
 //
 // This is what the GUI "reload" uses for a custom target or a built-in whose
 // API URL the user overrode, so pointing a CDN at a GitHub-hosted JSON file
-// works without the user having to match a specific text layout. Results are
-// IPv4-only, de-duplicated, and sorted.
+// works without the user having to match a specific text layout. Both address
+// families are accepted; results are de-duplicated and sorted, IPv4 first.
 func FetchCIDRs(ctx context.Context, c *http.Client, url string) ([]string, error) {
 	b, err := httpGet(ctx, c, url)
 	if err != nil {
@@ -354,19 +396,25 @@ func FetchCIDRs(ctx context.Context, c *http.Client, url string) ([]string, erro
 	// 3. Regex scrape (plain-text or anything else).
 	out := scrapeCIDRBytes(b)
 	if len(out) == 0 {
-		return nil, fmt.Errorf("no IPv4 ranges found at %s", url)
+		return nil, fmt.Errorf("no IP ranges found at %s", url)
 	}
 	return out, nil
 }
 
-// scrapeCIDRBytes regex-extracts every valid IPv4 CIDR / bare IP from b. Bare
-// IPs are normalised to /32; results are de-duplicated and sorted.
+// scrapeCIDRBytes regex-extracts every valid IPv4 / IPv6 CIDR or bare IP from b.
+// Bare IPs are normalised to /32 or /128; results are de-duplicated and sorted.
 func scrapeCIDRBytes(b []byte) []string {
-	return normalizeCIDRs(cidrRe.FindAllString(string(b), -1))
+	s := string(b)
+	matches := cidrRe.FindAllString(s, -1)
+	matches = append(matches, cidr6Re.FindAllString(s, -1)...)
+	return normalizeCIDRs(matches)
 }
 
 // normalizeCIDRs validates, masks, de-duplicates, and sorts a list of CIDR /
-// bare-IP strings, keeping IPv4 only. Bare IPs become /32.
+// bare-IP strings of either family. Bare IPs become /32 (v4) or /128 (v6).
+// Addresses that could never host a CDN edge — the unspecified address,
+// loopback, link-local and multicast — are dropped, which is also what filters
+// out the colon-separated noise the loose IPv6 regex picks up.
 func normalizeCIDRs(in []string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -376,10 +424,18 @@ func normalizeCIDRs(in []string) []string {
 			continue
 		}
 		if !strings.Contains(cidr, "/") {
-			cidr += "/32"
+			if strings.Contains(cidr, ":") {
+				cidr += "/128"
+			} else {
+				cidr += "/32"
+			}
 		}
 		p, err := netip.ParsePrefix(cidr)
-		if err != nil || !p.Addr().Is4() {
+		if err != nil {
+			continue
+		}
+		a := p.Addr()
+		if a.IsUnspecified() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsLinkLocalMulticast() || a.IsMulticast() {
 			continue
 		}
 		norm := p.Masked().String()
@@ -389,20 +445,30 @@ func normalizeCIDRs(in []string) []string {
 		seen[norm] = struct{}{}
 		out = append(out, norm)
 	}
-	sort.Strings(out)
+	sortCIDRs(out)
 	return out
 }
+
+// sortCIDRs orders entries IPv4 first, then IPv6, lexicographically within each
+// family — see iprange.Sort.
+func sortCIDRs(entries []string) { iprange.Sort(entries) }
 
 func fetchAWSCloudFront(ctx context.Context, c *http.Client, url string) ([]string, error) {
 	b, err := httpGet(ctx, c, url)
 	if err != nil {
 		return nil, err
 	}
+	// AWS publishes the two families as separate arrays with differently-named
+	// fields in the same document, so both are read and merged.
 	var doc struct {
 		Prefixes []struct {
 			IPPrefix string `json:"ip_prefix"`
 			Service  string `json:"service"`
 		} `json:"prefixes"`
+		IPv6Prefixes []struct {
+			IPv6Prefix string `json:"ipv6_prefix"`
+			Service    string `json:"service"`
+		} `json:"ipv6_prefixes"`
 	}
 	if err := json.Unmarshal(b, &doc); err != nil {
 		return nil, err
@@ -411,6 +477,11 @@ func fetchAWSCloudFront(ctx context.Context, c *http.Client, url string) ([]stri
 	for _, p := range doc.Prefixes {
 		if p.Service == "CLOUDFRONT" {
 			out = append(out, p.IPPrefix)
+		}
+	}
+	for _, p := range doc.IPv6Prefixes {
+		if p.Service == "CLOUDFRONT" {
+			out = append(out, p.IPv6Prefix)
 		}
 	}
 	if len(out) == 0 {
@@ -429,8 +500,8 @@ func Refresh(ctx context.Context, c *http.Client, name, ipsDir string, opts Fetc
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	cidrs = iprange.FilterV4(cidrs)
-	sort.Strings(cidrs)
+	cidrs = iprange.Filter(cidrs, iprange.FamilyAuto)
+	sortCIDRs(cidrs)
 	rf := &RangeFile{
 		CDN:       name,
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),

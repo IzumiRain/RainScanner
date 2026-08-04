@@ -165,7 +165,7 @@ func (r *Registry) Get(name string) (Record, bool) {
 }
 
 // Upsert creates or replaces a target by name and persists it. CIDRs are
-// filtered to valid IPv4 entries first. The Builtin flag is decided by the
+// filtered to valid IPv4/IPv6 entries first. The Builtin flag is decided by the
 // registry, not the caller: a name that matches a compiled-in CDN is always
 // treated as that built-in (so editing cloudflare's ranges in the GUI updates
 // the built-in's cache file), and any other name is a custom. The persisted
@@ -175,7 +175,7 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	if rec.Name == "" {
 		return Record{}, fmt.Errorf("target name is required")
 	}
-	rec.CIDRs = iprange.FilterV4(rec.CIDRs)
+	rec.CIDRs = iprange.Filter(rec.CIDRs, iprange.FamilyAuto)
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -265,8 +265,8 @@ func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts
 	if err != nil {
 		return Record{}, err
 	}
-	cidrs = iprange.FilterV4(cidrs)
-	sort.Strings(cidrs)
+	cidrs = iprange.Filter(cidrs, iprange.FamilyAuto)
+	iprange.Sort(cidrs)
 	rec.CIDRs = cidrs
 	return r.Upsert(rec)
 }
