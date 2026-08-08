@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 
 	"cdnscan/internal/app"
+	"cdnscan/internal/iprange"
 	"cdnscan/internal/link"
 	"cdnscan/internal/output"
 	"cdnscan/internal/pipeline"
@@ -115,7 +116,11 @@ func (s *Server) handleRanges(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown target", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"name": rec.Name, "count": len(rec.CIDRs), "cidrs": rec.CIDRs})
+	v4, v6 := iprange.Split(rec.CIDRs)
+	writeJSON(w, map[string]any{
+		"name": rec.Name, "count": len(rec.CIDRs), "cidrs": rec.CIDRs,
+		"count_v4": v4, "count_v6": v6,
+	})
 }
 
 // handleTargets is the CRUD endpoint for the persistent target store:
@@ -228,27 +233,29 @@ type customReq struct {
 }
 
 type scanReq struct {
-	CDN             string     `json:"cdn"`
-	Custom          *customReq `json:"custom"`
-	Ports           []int      `json:"ports"`
-	Link            string     `json:"link"`
-	XrayPath        string     `json:"xray_path"`
-	Port            int        `json:"port"`
-	TCPConcurrency  int        `json:"tcp_concurrency"`
-	XrayConcurrency int        `json:"xray_concurrency"` // max concurrent xray processes
-	BatchSize       int        `json:"batch_size"`       // candidates per xray process (0 = default)
-	Probes          int        `json:"probes"`
-	Confirm         int        `json:"confirm"`
-	MaxLatencyMS    int        `json:"max_latency_ms"`
-	ProbeTimeoutMS  int        `json:"probe_timeout_ms"` // 0 = auto (derive from max latency)
-	ProbeURL        string     `json:"probe_url"`
-	SamplePer24     int        `json:"sample_per_24"`
-	MaxHostsPerCIDR int        `json:"max_hosts_per_cidr"`
-	MaxTotal        int        `json:"max_total"` // random-sample cap across the whole pool (0 = all)
-	Lite            bool       `json:"lite"`          // low-power mode: hard-cap concurrency
-	Refresh         bool       `json:"refresh"`
-	PreferBackup    bool       `json:"prefer_backup"` // try backup source before official API
-	NoBackup        bool       `json:"no_backup"`     // skip backup sources entirely
+	CDN               string     `json:"cdn"`
+	Custom            *customReq `json:"custom"`
+	Ports             []int      `json:"ports"`
+	Link              string     `json:"link"`
+	XrayPath          string     `json:"xray_path"`
+	Port              int        `json:"port"`
+	TCPConcurrency    int        `json:"tcp_concurrency"`
+	XrayConcurrency   int        `json:"xray_concurrency"` // max concurrent xray processes
+	BatchSize         int        `json:"batch_size"`       // candidates per xray process (0 = default)
+	Probes            int        `json:"probes"`
+	Confirm           int        `json:"confirm"`
+	MaxLatencyMS      int        `json:"max_latency_ms"`
+	ProbeTimeoutMS    int        `json:"probe_timeout_ms"` // 0 = auto (derive from max latency)
+	ProbeURL          string     `json:"probe_url"`
+	SamplePer24       int        `json:"sample_per_24"`
+	MaxHostsPerCIDR   int        `json:"max_hosts_per_cidr"`
+	MaxTotal          int        `json:"max_total"`             // random-sample cap across the whole pool (0 = all)
+	Family            string     `json:"family"`                // ""|auto|ipv4|ipv6|both
+	MaxHostsPerV6CIDR int        `json:"max_hosts_per_v6_cidr"` // addresses drawn per IPv6 prefix (0 = default)
+	Lite              bool       `json:"lite"`                  // low-power mode: hard-cap concurrency
+	Refresh           bool       `json:"refresh"`
+	PreferBackup      bool       `json:"prefer_backup"` // try backup source before official API
+	NoBackup          bool       `json:"no_backup"`     // skip backup sources entirely
 }
 
 // scanResult is the consolidated payload sent in the SSE "result" event for the
@@ -256,7 +263,11 @@ type scanReq struct {
 type scanResult struct {
 	CDN          string              `json:"cdn"`
 	Ranges       int                 `json:"ranges"`
+	RangesV4     int                 `json:"ranges_v4"`
+	RangesV6     int                 `json:"ranges_v6"`
 	Hosts        int                 `json:"hosts"`
+	HostsV4      int                 `json:"hosts_v4"`
+	HostsV6      int                 `json:"hosts_v6"`
 	TCPOpen      int                 `json:"tcp_open"`
 	Confirmed    int                 `json:"confirmed"`
 	TCPIPs       []string            `json:"tcp_ips"`       // unique TCP-reachable IPs (copy-only-IPs)
@@ -273,7 +284,8 @@ func toScanRequest(req scanReq) app.ScanRequest {
 		TCPConcurrency: req.TCPConcurrency, XrayConcurrency: req.XrayConcurrency, BatchSize: req.BatchSize,
 		Probes: req.Probes, Confirm: req.Confirm, MaxLatencyMS: req.MaxLatencyMS, ProbeTimeoutMS: req.ProbeTimeoutMS,
 		ProbeURL: req.ProbeURL, SamplePer24: req.SamplePer24, MaxHostsPerCIDR: req.MaxHostsPerCIDR,
-		MaxTotal: req.MaxTotal, Lite: req.Lite, Refresh: req.Refresh,
+		MaxTotal: req.MaxTotal, Family: req.Family, MaxHostsPerV6CIDR: req.MaxHostsPerV6CIDR,
+		Lite: req.Lite, Refresh: req.Refresh,
 		PreferBackup: req.PreferBackup, NoBackup: req.NoBackup,
 	}
 	if req.Custom != nil {
@@ -366,7 +378,8 @@ func buildResult(summaries []pipeline.Summary, rawLink string) scanResult {
 	}
 	s := summaries[0]
 	res = scanResult{
-		CDN: s.CDN, Ranges: s.Ranges, Hosts: s.Hosts,
+		CDN: s.CDN, Ranges: s.Ranges, RangesV4: s.RangesV4, RangesV6: s.RangesV6,
+		Hosts: s.Hosts, HostsV4: s.HostsV4, HostsV6: s.HostsV6,
 		TCPOpen: s.TCPOpen, Confirmed: s.Confirmed,
 		Endpoints: s.Endpoints, Entries: s.Entries,
 	}

@@ -1,5 +1,6 @@
-// cdnscan: a unified, multi-CDN IPv4 scanner that confirms clean edge IPs by
-// measuring real Xray-proxied latency, not plain ICMP/TCP reachability.
+// cdnscan: a unified, multi-CDN dual-stack (IPv4 + IPv6) scanner that confirms
+// clean edge IPs by measuring real Xray-proxied latency, not plain ICMP/TCP
+// reachability.
 package main
 
 import (
@@ -20,6 +21,7 @@ import (
 	"net/http"
 
 	"cdnscan/internal/app"
+	"cdnscan/internal/iprange"
 	"cdnscan/internal/pipeline"
 	"cdnscan/internal/providers"
 	"cdnscan/internal/storage"
@@ -50,6 +52,9 @@ func main() {
 		probeTO     = flag.Duration("probe-timeout", 0, "stage2 per-request timeout (0 = auto: 2x max-latency, min 1.5s)")
 		samplePer24 = flag.Int("sample-per-24", 0, "sample N hosts per /24 (0 = full enumeration)")
 		maxPerCIDR  = flag.Int("max-hosts-per-cidr", 0, "cap hosts emitted per CIDR (0 = unlimited)")
+		family      = flag.String("family", "auto", "address families to scan: auto|ipv4|ipv6|both (auto = both when this machine has global IPv6)")
+		maxPerV6    = flag.Int("max-hosts-per-v6-cidr", 0, "addresses sampled from each IPv6 prefix (0 = 256; v6 blocks cannot be enumerated)")
+
 		refresh      = flag.Bool("refresh", false, "force re-fetch of provider ranges")
 		preferBackup = flag.Bool("prefer-backup", false, "try repo mirror (jsDelivr→raw) before official CDN API")
 		noBackup     = flag.Bool("no-backup", false, "use official CDN API only; skip backup mirror")
@@ -203,10 +208,14 @@ func main() {
 			SamplePer24:     *samplePer24,
 			MaxHostsPerCIDR: *maxPerCIDR,
 			MaxTotal:        *maxTotal,
-			Lite:            *lite,
-			Refresh:         *refresh,
-			PreferBackup:    *preferBackup,
-			NoBackup:        *noBackup,
+
+			Family:            *family,
+			MaxHostsPerV6CIDR: *maxPerV6,
+
+			Lite:         *lite,
+			Refresh:      *refresh,
+			PreferBackup: *preferBackup,
+			NoBackup:     *noBackup,
 		}, hooks)
 		if err != nil {
 			sb.finish()
@@ -219,8 +228,9 @@ func main() {
 	fmt.Printf("\nTotal time: %.1fs\n", sb.elapsed().Seconds())
 	fmt.Println("=== Summary ===")
 	for _, s := range summaries {
-		fmt.Printf("%-12s ranges=%d hosts=%d tcp_open=%d confirmed=%d -> %s\n",
-			s.CDN, s.Ranges, s.Hosts, s.TCPOpen, s.Confirmed, s.OutPath)
+		fmt.Printf("%-12s ranges=%d (v4=%d v6=%d) hosts=%d (v4=%d v6=%d) tcp_open=%d confirmed=%d -> %s\n",
+			s.CDN, s.Ranges, s.RangesV4, s.RangesV6, s.Hosts, s.HostsV4, s.HostsV6,
+			s.TCPOpen, s.Confirmed, s.OutPath)
 	}
 }
 
@@ -399,7 +409,8 @@ func runUpdater(ctx context.Context, dir string) {
 			failed++
 			continue
 		}
-		log.Printf("[%s] OK: %d CIDRs (source: %s)", entry.Name, len(cidrs), source)
+		v4, v6 := iprange.Split(cidrs)
+		log.Printf("[%s] OK: %d CIDRs — %d IPv4 / %d IPv6 (source: %s)", entry.Name, len(cidrs), v4, v6, source)
 		ok++
 	}
 	log.Printf("updater done: %d updated, %d skipped (manual), %d failed", ok, skipped, failed)
