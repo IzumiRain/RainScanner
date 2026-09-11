@@ -80,9 +80,19 @@ func dial(ctx context.Context, addr netip.Addr, port int, timeout time.Duration)
 	dctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Pin the dial to the candidate's own family. addr is always a literal, so
+	// nothing is resolved here; naming the family explicitly just stops the
+	// runtime from ever falling back to the other stack (an IPv6 candidate must
+	// be reached over IPv6 or not at all, otherwise a "reachable" result would
+	// say nothing about the v6 edge we are testing).
+	network := "tcp4"
+	if addr.Is6() && !addr.Is4In6() {
+		network = "tcp6"
+	}
+
 	d := net.Dialer{}
 	start := time.Now()
-	conn, err := d.DialContext(dctx, "tcp4", net.JoinHostPort(addr.String(), itoa(port)))
+	conn, err := d.DialContext(dctx, network, net.JoinHostPort(addr.String(), itoa(port)))
 	if err != nil {
 		return 0, false
 	}

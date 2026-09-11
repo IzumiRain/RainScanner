@@ -86,11 +86,17 @@ type Endpoint struct {
 	Port int    `json:"port"`
 }
 
-// Summary reports per-CDN outcome.
+// Summary reports per-CDN outcome. The v4/v6 splits describe the ranges and
+// candidates that were actually scanned — i.e. after the address family filter,
+// so a dual-stack provider scanned in IPv4-only mode reports RangesV6 == 0.
 type Summary struct {
 	CDN       string         `json:"cdn"`
 	Ranges    int            `json:"ranges"`
+	RangesV4  int            `json:"ranges_v4"`
+	RangesV6  int            `json:"ranges_v6"`
 	Hosts     int            `json:"hosts"`
+	HostsV4   int            `json:"hosts_v4"`
+	HostsV6   int            `json:"hosts_v6"`
 	TCPOpen   int            `json:"tcp_open"`
 	Confirmed int            `json:"confirmed"`
 	OutPath   string         `json:"out_path"`
@@ -112,6 +118,7 @@ func Run(ctx context.Context, cfg Config) ([]Summary, error) {
 	if cfg.CandidatePort <= 0 {
 		cfg.CandidatePort = cfg.TCP.Port
 	}
+	cfg.Sample.Family = resolveFamily(cfg.Sample.Family, cfg.Log)
 
 	if cfg.Custom != nil {
 		s, err := runOne(ctx, cfg, cfg.Custom.Name, cfg.Custom.CIDRs)
@@ -134,6 +141,22 @@ func Run(ctx context.Context, cfg Config) ([]Summary, error) {
 	return summaries, nil
 }
 
+// resolveFamily turns the "auto" default into a concrete choice. Auto means
+// dual-stack when this machine has global IPv6 connectivity, and IPv4-only when
+// it doesn't — on a v4-only host every IPv6 dial fails instantly with "network
+// unreachable", so scanning the v6 half of a dual-stack CDN would spend the
+// candidate budget on guaranteed misses and report a confusing zero.
+func resolveFamily(f iprange.Family, log func(string, ...any)) iprange.Family {
+	if f != iprange.FamilyAuto {
+		return f
+	}
+	if scan.HasGlobalIPv6() {
+		return iprange.FamilyBoth
+	}
+	log("no global IPv6 address on this machine — scanning IPv4 only (force with family=both)")
+	return iprange.FamilyV4
+}
+
 // ports returns the configured scan ports, falling back to the single TCP.Port.
 func (cfg Config) ports() []int {
 	if len(cfg.Ports) > 0 {
@@ -148,6 +171,7 @@ func (cfg Config) ports() []int {
 func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summary, error) {
 	s := Summary{CDN: name}
 
+	var source string
 	if cidrs == nil {
 		rf, err := providers.LoadOrRefresh(ctx, cfg.HTTPClient, name, cfg.IPsDir, cfg.ForceRefresh,
 			providers.FetchOptions{PreferBackup: cfg.PreferBackup, NoBackup: cfg.NoBackup})
@@ -155,16 +179,19 @@ func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summa
 			return s, err
 		}
 		cidrs = rf.CIDRs
-		s.Ranges = len(cidrs)
-		if rf.Source != "" {
-			cfg.Log("[%s] %d CIDR ranges (source: %s)", name, len(cidrs), rf.Source)
-		} else {
-			cfg.Log("[%s] %d CIDR ranges", name, len(cidrs))
-		}
+		source = rf.Source
+	}
+
+	// Drop the families we aren't scanning up front, so every count reported
+	// from here on describes the work actually done rather than what the
+	// provider happens to publish.
+	cidrs = iprange.Filter(cidrs, cfg.Sample.Family)
+	s.Ranges = len(cidrs)
+	s.RangesV4, s.RangesV6 = iprange.Split(cidrs)
+	if source != "" {
+		cfg.Log("[%s] %d CIDR ranges — %d IPv4 / %d IPv6 (source: %s)", name, s.Ranges, s.RangesV4, s.RangesV6, source)
 	} else {
-		cidrs = iprange.FilterV4(cidrs)
-		s.Ranges = len(cidrs)
-		cfg.Log("[%s] %d CIDR ranges", name, len(cidrs))
+		cfg.Log("[%s] %d CIDR ranges — %d IPv4 / %d IPv6", name, s.Ranges, s.RangesV4, s.RangesV6)
 	}
 
 	hosts, err := iprange.Expand(cidrs, cfg.Sample)
@@ -172,7 +199,14 @@ func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summa
 		return s, err
 	}
 	s.Hosts = len(hosts)
-	cfg.Log("[%s] expanded to %d candidate IPs", name, len(hosts))
+	for _, h := range hosts {
+		if h.Is4() {
+			s.HostsV4++
+		} else {
+			s.HostsV6++
+		}
+	}
+	cfg.Log("[%s] expanded to %d candidate IPs — %d IPv4 / %d IPv6", name, s.Hosts, s.HostsV4, s.HostsV6)
 
 	// Stage 1: TCP pre-filter across all configured ports.
 	survivors := stage1(ctx, cfg, name, hosts)
