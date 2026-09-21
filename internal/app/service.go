@@ -148,10 +148,17 @@ type ScanRequest struct {
 	SamplePer24     int
 	MaxHostsPerCIDR int
 	MaxTotal        int
-	Lite            bool
-	Refresh         bool
-	PreferBackup    bool
-	NoBackup        bool
+	// Family selects the address families to scan: "" / "auto" (dual-stack when
+	// this machine has global IPv6, IPv4-only when it doesn't), "ipv4", "ipv6",
+	// or "both". See iprange.ParseFamily for accepted spellings.
+	Family string
+	// MaxHostsPerV6CIDR caps how many addresses are drawn from one IPv6 prefix.
+	// 0 = iprange.DefaultV6HostsPerCIDR; there is no "enumerate it all" for IPv6.
+	MaxHostsPerV6CIDR int
+	Lite              bool
+	Refresh           bool
+	PreferBackup      bool
+	NoBackup          bool
 }
 
 // ScanHooks carry live log/progress callbacks (nil-safe).
@@ -222,9 +229,11 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 		PreferBackup: req.PreferBackup,
 		NoBackup:     req.NoBackup,
 		Sample: iprange.Strategy{
-			SamplePer24:     req.SamplePer24,
-			MaxHostsPerCIDR: req.MaxHostsPerCIDR,
-			MaxTotal:        req.MaxTotal,
+			SamplePer24:       req.SamplePer24,
+			MaxHostsPerCIDR:   req.MaxHostsPerCIDR,
+			MaxTotal:          req.MaxTotal,
+			Family:            iprange.ParseFamily(req.Family),
+			MaxHostsPerV6CIDR: req.MaxHostsPerV6CIDR,
 		},
 		TCP:             scan.Options{Port: port, Concurrency: tcpConc, Timeout: time.Duration(orInt(req.TCPTimeoutMS, 3000)) * time.Millisecond},
 		Prober:          prober,

@@ -5,388 +5,453 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <title>RainScanner — clean CDN IP finder</title>
 <link rel="icon" type="image/png" href="/static/logo-circle.png" />
 <style>
+/* ══════════════════════════════════════════════════════════════════════════
+   Design tokens. Near-black ink, one hairline, cyan as the only loud colour.
+   ══════════════════════════════════════════════════════════════════════════ */
 :root{
-  --bg:#07071a; --panel:rgba(16,12,40,.65); --panel-solid:#100c28;
-  --border:rgba(139,92,246,.18); --border-hi:rgba(139,92,246,.45);
-  --fg:#ede9ff; --muted:#9b8dc8;
-  --blue:#4f8cff; --purple:#a855f7; --pink:#ec4899; --cyan:#22d3ee; --accent:#7c6cff;
-  --ok:#34d399; --warn:#fbbf24; --err:#f87171;
-  --grad:linear-gradient(135deg,#4f8cff,#a855f7,#ec4899);
-  --mono:'JetBrains Mono','SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  --ink:#04070d; --panel:#070d17; --panel-2:#0a1322; --panel-3:#0d1626;
+  --line:rgba(148,163,184,.13); --line-hi:rgba(34,211,238,.28);
+  --fg:#e2e8f0; --fg-hi:#f0f9ff; --mist:#93a4ba; --mist-dim:#64748b;
+  --rain:#22d3ee; --ice:#a5f3fc; --sky:#60a5fa; --violet:#a78bfa;
+  --ok:#34d399; --warn:#fbbf24; --err:#fb7185;
+  --grad:linear-gradient(100deg,#a5f3fc 0%,#22d3ee 42%,#60a5fa 78%,#a78bfa 100%);
+  --grad-btn:linear-gradient(90deg,#67e8f9,#38bdf8);
+  --display:'Space Grotesk',ui-sans-serif,system-ui,sans-serif;
+  --body:'Inter',ui-sans-serif,system-ui,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Consolas,monospace;
+  --ease:cubic-bezier(.21,.47,.32,.98);
 }
 *{box-sizing:border-box}
-body{margin:0;color:var(--fg);
-  font-family:'Space Grotesk',Arial,system-ui,sans-serif;font-size:14px;
-  background:
-    radial-gradient(1200px 600px at 8% -8%,  rgba(79,140,255,.22),  transparent 60%),
-    radial-gradient(1100px 700px at 108% 4%,  rgba(236,72,153,.20),  transparent 55%),
-    radial-gradient(900px  900px at 50%  120%, rgba(168,85,247,.20),  transparent 60%),
-    radial-gradient(700px  500px at 0%   55%,  rgba(34,211,238,.10),  transparent 50%),
-    var(--bg);
-  background-attachment:fixed}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--ink);color:var(--fg);
+  font-family:var(--body);font-size:14px;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility;
+  overflow-x:hidden}
 
-/* ── Scrollbars ── */
-::-webkit-scrollbar{width:8px;height:8px}
-::-webkit-scrollbar-thumb{background:rgba(124,108,255,.3);border-radius:8px}
-::-webkit-scrollbar-thumb:hover{background:rgba(124,108,255,.5)}
-::-webkit-scrollbar-track{background:transparent}
+::selection{background:rgba(34,211,238,.28);color:var(--fg-hi)}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-track{background:var(--ink)}
+::-webkit-scrollbar-thumb{background:#16233a;border-radius:8px}
+::-webkit-scrollbar-thumb:hover{background:#1e324f}
+:focus-visible{outline:2px solid var(--rain);outline-offset:3px;border-radius:4px}
+
+/* ── Ambient layers: rain canvas + grid + corner glows ── */
+#rain,.bg-layer{position:fixed;inset:0;pointer-events:none}
+#rain{z-index:-3}
+.bg-grid{z-index:-2;
+  background-image:
+    linear-gradient(rgba(148,163,184,.055) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(148,163,184,.055) 1px,transparent 1px);
+  background-size:46px 46px;
+  mask-image:linear-gradient(to bottom,black,transparent 88%)}
+.bg-glow{z-index:-1;
+  background:
+    radial-gradient(900px 480px at 6% -6%,rgba(34,211,238,.10),transparent 62%),
+    radial-gradient(820px 520px at 104% 2%,rgba(96,165,250,.09),transparent 58%),
+    radial-gradient(760px 620px at 46% 116%,rgba(167,139,250,.07),transparent 60%)}
+
+/* ── Shared surface treatments (ported from the sample's utility classes) ── */
+.text-gradient{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.frame{position:relative;border:1px solid var(--line);
+  background:linear-gradient(180deg,rgba(255,255,255,.045),rgba(255,255,255,.01)),var(--panel)}
+.frame-bright{border:1px solid transparent;
+  background:linear-gradient(var(--panel-2),var(--panel-2)) padding-box,
+    linear-gradient(135deg,rgba(34,211,238,.55),rgba(96,165,250,.12) 45%,rgba(167,139,250,.4)) border-box}
+.spot-card::before{content:'';position:absolute;inset:0;border-radius:inherit;
+  opacity:0;transition:opacity .45s ease;pointer-events:none;
+  background:radial-gradient(460px circle at var(--mx,50%) var(--my,50%),rgba(34,211,238,.09),transparent 46%)}
+.spot-card:hover::before{opacity:1}
+.btn-sheen{position:relative;overflow:hidden}
+.btn-sheen::after{content:'';position:absolute;top:0;left:-70%;width:45%;height:100%;
+  transform:skewX(-20deg);pointer-events:none;transition:left .65s ease;
+  background:linear-gradient(90deg,transparent,rgba(255,255,255,.28),transparent)}
+.btn-sheen:hover::after{left:130%}
+.hair{position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,rgba(34,211,238,.7),transparent)}
 
 /* ── Page skeleton ── */
 .page-body{display:flex;flex-direction:column;height:100vh;overflow:hidden}
 .page-main{display:flex;flex:1;overflow:hidden}
 #content{flex:1;overflow-y:auto;min-width:0}
-.content-inner{padding:18px;display:flex;flex-direction:column;gap:16px}
+.content-inner{padding:20px;display:flex;flex-direction:column;gap:16px;max-width:1680px}
 
 /* ── Header ── */
-header{flex:none;height:64px;padding:0 20px;
-  border-bottom:1px solid var(--border);display:flex;align-items:center;gap:13px;
-  background:rgba(7,7,26,.6);backdrop-filter:blur(10px);
-  position:relative;z-index:60;
-  animation:fadeDown .5s ease both}
-header .logo{width:42px;height:42px;border-radius:50%;flex:none;object-fit:cover;
-  animation:glow 3.6s ease-in-out infinite}
-header .brand{display:flex;flex-direction:column;gap:1px}
-header h1{font-size:19px;margin:0;font-weight:700;letter-spacing:.02em;
-  background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
-header .tag{color:var(--muted);font-size:12px}
-header h1 .ver{font-size:11px;font-weight:700;vertical-align:middle;margin-left:8px;
-  padding:1px 8px;border-radius:999px;letter-spacing:.02em;
-  color:var(--blue);-webkit-text-fill-color:var(--blue);
-  background:rgba(79,140,255,.14);border:1px solid rgba(79,140,255,.38)}
-header .xupd{margin-left:auto;display:flex;align-items:center;gap:9px}
-header .xupd a.gh{display:inline-flex;align-items:center;gap:7px;text-decoration:none;
-  white-space:nowrap;border-radius:999px;padding:7px 14px;
-  font-size:12px;font-weight:700;
-  border:1px solid var(--border-hi);background:rgba(124,108,255,.1);color:#d6d0ff;
-  transition:transform .15s,box-shadow .2s,background .2s,border-color .2s}
-header .xupd a.gh:hover{background:rgba(124,108,255,.22);border-color:var(--purple);
-  box-shadow:0 0 16px rgba(124,108,255,.35);transform:translateY(-1px)}
-header .xupd a.gh svg{width:15px;height:15px;fill:currentColor}
-@media(max-width:480px){header .tag{display:none}}
+header{flex:none;height:72px;padding:0 22px;z-index:60;position:relative;
+  display:flex;align-items:center;gap:14px;
+  border-bottom:1px solid rgba(255,255,255,.07);
+  background:rgba(4,7,13,.8);backdrop-filter:blur(18px);
+  box-shadow:0 8px 40px -16px rgba(2,8,20,.9);
+  animation:fadeDown .5s var(--ease) both}
+header .logo{width:40px;height:40px;border-radius:50%;flex:none;object-fit:cover;
+  border:1px solid rgba(34,211,238,.35);
+  box-shadow:0 0 0 4px rgba(34,211,238,.06),0 0 24px -6px rgba(34,211,238,.55)}
+header .brand{display:flex;flex-direction:column;gap:2px;min-width:0}
+header h1{font-family:var(--display);font-size:19px;margin:0;font-weight:600;
+  letter-spacing:-.02em;color:#f8fafc;display:flex;align-items:center;gap:9px}
+header .ver{font-family:var(--mono);font-size:10px;font-weight:500;letter-spacing:.04em;
+  padding:2px 9px;border-radius:999px;color:#0b1220;
+  background:var(--grad-btn)}
+header .tag{color:var(--mist);font-size:12px;letter-spacing:.01em}
+header .xupd{margin-left:auto;display:flex;align-items:center;gap:10px}
+header .gh{display:inline-flex;align-items:center;gap:8px;text-decoration:none;
+  white-space:nowrap;border-radius:999px;padding:8px 15px;font-size:13px;font-weight:600;
+  border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#cbd5e1;
+  transition:transform .18s var(--ease),background .2s,border-color .2s,color .2s}
+header .gh:hover{background:rgba(34,211,238,.09);border-color:rgba(34,211,238,.3);
+  color:var(--fg-hi);transform:translateY(-1px)}
+header .gh svg{width:16px;height:16px;fill:currentColor}
+@media(max-width:560px){header .tag{display:none}header .gh span{display:none}}
 
 /* ── Hamburger ── */
-.hamburger{display:none;background:rgba(124,108,255,.1);border:1px solid var(--border-hi);
-  color:#d6d0ff;border-radius:8px;padding:7px 11px;font-size:17px;cursor:pointer;
-  line-height:1;align-items:center;transition:background .15s,box-shadow .15s}
-.hamburger:hover{background:rgba(124,108,255,.22);box-shadow:0 0 12px rgba(124,108,255,.3)}
+.hamburger{display:none;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.1);
+  color:#cbd5e1;border-radius:10px;padding:8px 11px;cursor:pointer;line-height:0;
+  align-items:center;transition:background .18s,border-color .18s}
+.hamburger:hover{background:rgba(34,211,238,.1);border-color:rgba(34,211,238,.3)}
+.hamburger svg{width:18px;height:18px}
 @media(max-width:767px){.hamburger{display:inline-flex}}
 
 /* ── Scrim ── */
-#scrim{position:fixed;inset:0;background:rgba(5,3,20,.6);z-index:40;
-  opacity:0;pointer-events:none;transition:opacity 250ms}
+#scrim{position:fixed;inset:0;background:rgba(2,6,14,.72);backdrop-filter:blur(3px);
+  z-index:40;opacity:0;pointer-events:none;transition:opacity .25s var(--ease)}
 body.drawer-open #scrim{opacity:1;pointer-events:auto}
 @media(min-width:768px){#scrim{display:none!important}}
 
-/* ── Drawer / Sidebar ── */
-#drawer{width:260px;flex:none;display:flex;flex-direction:column;overflow:hidden;
-  background:var(--panel-solid);border-right:1px solid var(--border)}
+/* ── Sidebar ── */
+#drawer{width:290px;flex:none;display:flex;flex-direction:column;overflow:hidden;
+  background:linear-gradient(180deg,rgba(10,19,34,.92),rgba(4,7,13,.96));
+  border-right:1px solid rgba(255,255,255,.06)}
 @media(max-width:767px){
-  #drawer{position:fixed;top:64px;left:0;height:calc(100vh - 64px);
-    z-index:50;transform:translateX(-260px);transition:transform 250ms ease-out}
+  #drawer{position:fixed;top:72px;left:0;height:calc(100vh - 72px);z-index:50;
+    transform:translateX(-292px);transition:transform .28s var(--ease)}
   body.drawer-open #drawer{transform:translateX(0)}
 }
-@media(min-width:768px) and (max-width:1079px){#drawer{width:220px}}
+@media(min-width:768px) and (max-width:1079px){#drawer{width:246px}}
+.sidebar-scroll{flex:1;overflow-y:auto;padding:18px 15px}
+.sidebar-foot{flex:none;padding:14px 15px;border-top:1px solid rgba(255,255,255,.06);
+  background:rgba(4,7,13,.6)}
 
-.sidebar-scroll{flex:1;overflow-y:auto;padding:16px 14px}
-.sidebar-foot{flex:none;padding:12px 14px;border-top:1px solid var(--border)}
+/* ── Eyebrow micro-label (the sample's signature) ── */
+.eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
+  font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:.2em;
+  color:var(--rain)}
+.eyebrow .dot{width:5px;height:5px;border-radius:50%;background:var(--rain);flex:none;
+  box-shadow:0 0 0 3px rgba(34,211,238,.16)}
+.eyebrow.idle{color:var(--mist-dim)}
+.eyebrow.idle .dot{background:var(--mist-dim);box-shadow:0 0 0 3px rgba(148,163,184,.1)}
+@keyframes pingdot{0%{box-shadow:0 0 0 0 rgba(34,211,238,.45)}
+  70%{box-shadow:0 0 0 7px rgba(34,211,238,0)}100%{box-shadow:0 0 0 0 rgba(34,211,238,0)}}
+.eyebrow.live .dot{animation:pingdot 1.6s var(--ease) infinite}
 
-/* ── Sidebar: targets section label ── */
-.sec-title{display:flex;align-items:center;justify-content:space-between;
-  font-size:10px;text-transform:uppercase;letter-spacing:.08em;
-  color:var(--muted);margin:0 0 10px;font-weight:700}
+.sec-title{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:0 0 12px}
 .sec-actions{display:flex;align-items:center;gap:7px}
-/* segmented source switch (github / official api) beside the reload button */
-.src-switch{display:inline-flex;height:22px;border:1px solid var(--border-hi);
-  border-radius:7px;overflow:hidden;background:rgba(10,9,28,.55)}
-.src-opt{appearance:none;border:0;background:transparent;cursor:pointer;
-  font-family:'Space Grotesk',sans-serif;font-size:9px;font-weight:800;
-  text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
-  padding:0 8px;transition:background .2s,color .2s}
-.src-opt:not(.on):hover{color:#cdb3ff;background:rgba(124,108,255,.12)}
-.src-opt.on{background:var(--grad);color:#fff}
-.reload-all{flex:none;display:inline-flex;align-items:center;justify-content:center;
-  width:22px;height:22px;padding:0;border:1px solid var(--border-hi);border-radius:7px;
-  background:rgba(124,108,255,.1);color:#cdb3ff;font-size:13px;cursor:pointer;
-  transition:background .2s,box-shadow .2s}
-.reload-all:hover{background:rgba(168,85,247,.18);box-shadow:0 0 12px rgba(168,85,247,.3)}
-.reload-all:disabled{opacity:.5;cursor:not-allowed}
-.reload-all .ra-ic{display:inline-block;line-height:1}
-@keyframes raspin{to{transform:rotate(360deg)}}
-.reload-all.spin .ra-ic{animation:raspin .8s linear infinite}
 
-/* ── CDN pick cards ── */
-.cdns{display:flex;flex-direction:column;gap:7px;margin-bottom:12px}
+/* segmented source switch (github / official api) */
+.src-switch{display:inline-flex;height:23px;border:1px solid var(--line);
+  border-radius:999px;overflow:hidden;background:rgba(255,255,255,.03)}
+.src-opt{appearance:none;border:0;background:transparent;cursor:pointer;
+  font-family:var(--mono);font-size:9px;font-weight:500;text-transform:uppercase;
+  letter-spacing:.1em;color:var(--mist-dim);padding:0 9px;transition:background .2s,color .2s}
+.src-opt:not(.on):hover{color:var(--ice);background:rgba(34,211,238,.08)}
+.src-opt.on{background:var(--grad-btn);color:#0b1220;font-weight:600}
+.reload-all{flex:none;display:inline-flex;align-items:center;justify-content:center;
+  width:23px;height:23px;padding:0;border:1px solid var(--line);border-radius:8px;
+  background:rgba(255,255,255,.03);color:var(--mist);cursor:pointer;
+  transition:background .2s,color .2s,border-color .2s}
+.reload-all:hover{background:rgba(34,211,238,.1);color:var(--rain);border-color:var(--line-hi)}
+.reload-all:disabled{opacity:.45;cursor:not-allowed}
+.reload-all svg{width:12px;height:12px}
+@keyframes raspin{to{transform:rotate(360deg)}}
+.reload-all.spin svg{animation:raspin .9s linear infinite}
+
+/* ── Target pick cards ── */
+.cdns{display:flex;flex-direction:column;gap:7px;margin-bottom:11px}
 .pick{position:relative;display:flex;align-items:center;justify-content:space-between;
-  gap:8px;background:rgba(10,9,28,.55);border:1px solid var(--border);border-radius:10px;
-  padding:10px 13px;cursor:pointer;user-select:none;font-size:13px;font-weight:600;
-  transition:border-color .15s,background .15s,box-shadow .15s,transform .12s}
-.pick:hover{border-color:var(--border-hi);transform:translateX(2px)}
-.pick.on{border-color:var(--purple);background:rgba(124,108,255,.18);color:#fff;
-  box-shadow:0 0 20px rgba(124,108,255,.28)}
-.pick.on::before{content:'';position:absolute;inset:-1px;border-radius:11px;
-  background:linear-gradient(135deg,var(--purple),var(--pink));
-  opacity:.3;pointer-events:none;z-index:0}
-.pick>*{position:relative;z-index:1}
-.pick .badge{font-size:10px;font-weight:500;color:var(--muted)}
-.pick .right{display:flex;align-items:center;gap:8px}
-.pick .edit{opacity:.4;font-size:13px;padding:2px 4px;border-radius:4px;cursor:pointer;
-  transition:opacity .15s,background .15s}
-.pick .edit:hover{opacity:1;background:rgba(255,255,255,.08)}
+  gap:8px;border:1px solid var(--line);border-radius:12px;padding:11px 13px;
+  background:linear-gradient(180deg,rgba(255,255,255,.04),rgba(255,255,255,.008)),var(--panel);
+  cursor:pointer;user-select:none;font-size:13px;font-weight:500;overflow:hidden;
+  transition:border-color .2s,transform .18s var(--ease),box-shadow .3s}
+.pick:hover{border-color:rgba(34,211,238,.2);transform:translateY(-1px);
+  box-shadow:0 20px 60px -30px rgba(34,211,238,.5)}
+.pick.on{border-color:rgba(34,211,238,.45);background:var(--panel-2);
+  box-shadow:0 18px 50px -26px rgba(34,211,238,.7)}
+.pick.on::after{content:'';position:absolute;left:0;top:12%;bottom:12%;width:2px;
+  border-radius:999px;background:var(--grad-btn)}
+.pick .nm{color:var(--fg);letter-spacing:-.005em}
+.pick.on .nm{color:var(--fg-hi)}
+.pick .right{display:flex;align-items:center;gap:9px;flex:none}
+.pick .badge{font-family:var(--mono);font-size:10px;color:var(--mist-dim);letter-spacing:.02em}
+.pick.on .badge{color:var(--rain)}
+.pick .edit{display:inline-flex;opacity:.35;padding:3px;border-radius:6px;cursor:pointer;
+  color:var(--mist);transition:opacity .18s,background .18s,color .18s}
+.pick .edit svg{width:13px;height:13px;pointer-events:none}
+.pick .edit:hover{opacity:1;background:rgba(255,255,255,.07);color:var(--rain)}
 .pick.custom{border-style:dashed}
 .pick.custom .badge{color:var(--warn)}
 
-/* ── Add custom ── */
-.addcustom{border:2px dashed var(--border-hi);color:#cdb3ff;
-  background:rgba(124,108,255,.07);border-radius:10px;padding:11px;
-  cursor:pointer;text-align:center;font-weight:700;font-size:13px;
-  transition:background .15s,border-color .15s,box-shadow .15s;margin-bottom:4px}
-.addcustom:hover{background:rgba(168,85,247,.16);border-color:var(--purple);
-  box-shadow:0 0 14px rgba(168,85,247,.25)}
+.addcustom{display:flex;align-items:center;justify-content:center;gap:7px;
+  border:1px dashed rgba(34,211,238,.3);color:var(--ice);
+  background:rgba(34,211,238,.05);border-radius:12px;padding:11px;
+  cursor:pointer;font-weight:600;font-size:12.5px;
+  transition:background .2s,border-color .2s,color .2s}
+.addcustom:hover{background:rgba(34,211,238,.12);border-color:rgba(34,211,238,.55);color:var(--fg-hi)}
+.addcustom svg{width:14px;height:14px}
 
-/* ── Sidebar divider ── */
-.sidebar-divider{border:none;border-top:1px solid var(--border);margin:14px 0}
+.sidebar-divider{border:none;border-top:1px solid rgba(255,255,255,.06);margin:16px 0}
 
 /* ── Advanced settings ── */
-details.adv summary{cursor:pointer;list-style:none;display:flex;align-items:center;
-  gap:9px;padding:10px 13px;border-radius:11px;border:1px solid var(--border-hi);
-  background:rgba(124,108,255,.08);color:#d6d0ff;font-size:12px;font-weight:700;
-  transition:background .15s,box-shadow .15s,border-color .15s}
-details.adv summary:hover{background:rgba(124,108,255,.18);
-  box-shadow:0 0 14px rgba(124,108,255,.22)}
+details.adv summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:9px;
+  padding:11px 13px;border-radius:12px;border:1px solid var(--line);
+  background:rgba(255,255,255,.03);color:#cbd5e1;font-size:12.5px;font-weight:600;
+  transition:background .2s,border-color .2s,color .2s}
+details.adv summary:hover{background:rgba(34,211,238,.07);border-color:rgba(34,211,238,.24);color:var(--fg-hi)}
 details.adv summary::-webkit-details-marker{display:none}
-details.adv .adv-ico{display:inline-block;color:var(--purple);font-size:10px;
-  transition:transform .2s}
-details.adv[open] .adv-ico{transform:rotate(90deg)}
-.adv-body{display:flex;flex-direction:column;gap:11px;margin-top:10px}
-.adv-group{background:rgba(10,9,28,.42);border:1px solid var(--border);
-  border-radius:12px;padding:10px 12px 13px}
-.adv-group .gh{display:flex;align-items:center;gap:7px;font-size:10px;
-  text-transform:uppercase;letter-spacing:.09em;color:var(--purple);font-weight:800;
-  padding-bottom:4px;border-bottom:1px solid var(--border);margin-bottom:4px}
+details.adv summary svg.ic{width:14px;height:14px;color:var(--rain);flex:none}
+details.adv .chev{margin-left:auto;color:var(--mist-dim);transition:transform .22s var(--ease)}
+details.adv .chev svg{width:13px;height:13px;display:block}
+details.adv[open] .chev{transform:rotate(90deg)}
+.adv-body{display:flex;flex-direction:column;gap:11px;margin-top:11px}
+.adv-group{border:1px solid var(--line);border-radius:14px;padding:11px 13px 14px;
+  background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.006)),var(--panel)}
+.adv-group .gh{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:9.5px;
+  text-transform:uppercase;letter-spacing:.18em;color:var(--rain);font-weight:500;
+  padding-bottom:8px;border-bottom:1px solid var(--line);margin-bottom:2px}
+.adv-group .gh svg{width:13px;height:13px;flex:none}
 
 /* ── Form fields ── */
-label{display:block;font-size:12px;color:var(--muted);margin:11px 0 4px}
+label{display:block;font-size:11.5px;color:var(--mist);margin:11px 0 5px;font-weight:500}
 input[type=text],input[type=number],select,textarea{
-  width:100%;background:rgba(10,9,28,.7);border:1px solid var(--border);color:var(--fg);
-  border-radius:8px;padding:8px 10px;font-size:12px;font-family:var(--mono);
-  transition:border-color .15s,box-shadow .15s}
+  width:100%;background:rgba(2,6,14,.7);border:1px solid var(--line);color:var(--fg);
+  border-radius:9px;padding:9px 11px;font-size:12px;font-family:var(--mono);
+  transition:border-color .18s,box-shadow .18s,background .18s}
+input::placeholder,textarea::placeholder{color:#475569}
 input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{
-  outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(124,108,255,.18)}
-textarea{resize:vertical;line-height:1.5}
+  outline:none;border-color:rgba(34,211,238,.5);background:rgba(2,6,14,.9);
+  box-shadow:0 0 0 3px rgba(34,211,238,.12)}
+select{appearance:none;cursor:pointer;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2393a4ba' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 11px center;padding-right:30px}
+select option{background:var(--panel-2);color:var(--fg)}
+textarea{resize:vertical;line-height:1.55}
 .row{display:flex;gap:10px}
-.row>div{flex:1}
-.adv .row{flex-wrap:wrap;gap:8px}
-.adv .row>div{flex:1 1 calc(50% - 4px);min-width:0}
-.hint{color:var(--muted);font-size:11px;margin-top:4px;line-height:1.4}
+.row>div{flex:1;min-width:0}
+.adv .row{flex-wrap:wrap;gap:9px}
+.adv .row>div{flex:1 1 calc(50% - 5px);min-width:0}
+.hint{color:var(--mist-dim);font-size:11px;margin-top:6px;line-height:1.5}
 
 /* ── Toggle switch ── */
-.switch{display:flex;align-items:center;gap:10px;cursor:pointer;margin-top:11px;
-  font-size:12px;color:var(--fg);user-select:none}
+.switch{display:flex;align-items:center;gap:11px;cursor:pointer;margin-top:12px;
+  font-size:12px;color:#cbd5e1;user-select:none;line-height:1.4}
 .switch input{display:none}
 .switch .track{flex:none;width:36px;height:20px;border-radius:999px;
-  background:rgba(124,108,255,.16);border:1px solid var(--border-hi);
-  position:relative;transition:background .2s,box-shadow .2s}
-.switch .track::after{content:'';position:absolute;top:2px;left:2px;
-  width:14px;height:14px;border-radius:50%;background:#cfc7ff;
-  transition:transform .2s,background .2s}
-.switch input:checked+.track{background:var(--grad);
-  box-shadow:0 0 12px rgba(168,85,247,.4)}
-.switch input:checked+.track::after{transform:translateX(16px);background:#fff}
+  background:rgba(255,255,255,.07);border:1px solid var(--line);
+  position:relative;transition:background .22s,border-color .22s,box-shadow .22s}
+.switch .track::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;
+  border-radius:50%;background:#94a3b8;transition:transform .22s var(--ease),background .22s}
+.switch input:checked+.track{background:var(--grad-btn);border-color:transparent;
+  box-shadow:0 0 16px -3px rgba(34,211,238,.7)}
+.switch input:checked+.track::after{transform:translateX(16px);background:#04070d}
 
-/* ── Start/Stop button ── */
-button.go{width:100%;background:var(--grad);background-size:200% 200%;border:0;
-  color:#fff;font-weight:700;padding:12px;border-radius:11px;cursor:pointer;
-  font-size:14px;letter-spacing:.02em;font-family:'Space Grotesk',sans-serif;
-  box-shadow:0 6px 22px rgba(124,108,255,.38);
-  transition:transform .15s,box-shadow .2s,background-position .5s}
-button.go:hover{transform:translateY(-2px);
-  box-shadow:0 11px 30px rgba(168,85,247,.5);background-position:100% 50%}
+/* ── Start / Stop ── */
+button.go{width:100%;border:0;cursor:pointer;border-radius:999px;padding:13px;
+  font-family:var(--display);font-size:14px;font-weight:600;letter-spacing:-.01em;
+  color:#0b1220;background:var(--grad-btn);
+  box-shadow:0 12px 42px -10px rgba(34,211,238,.65);
+  display:flex;align-items:center;justify-content:center;gap:8px;
+  transition:transform .18s var(--ease),box-shadow .25s,filter .2s}
+button.go svg{width:15px;height:15px}
+button.go:hover{transform:translateY(-2px);box-shadow:0 18px 52px -12px rgba(34,211,238,.85)}
 button.go:active{transform:translateY(0)}
-button.go:disabled{opacity:.5;cursor:not-allowed;transform:none;box-shadow:none}
-button.go.stop{background:linear-gradient(135deg,#ff5d7a,#c026d3)}
+button.go:disabled{opacity:.45;cursor:not-allowed;transform:none;box-shadow:none}
+button.go.stop{background:linear-gradient(90deg,#fda4af,#fb7185);color:#1c0910;
+  box-shadow:0 12px 42px -10px rgba(251,113,133,.6)}
+@keyframes btnPulse{0%,100%{box-shadow:0 12px 42px -10px rgba(251,113,133,.6)}
+  50%{box-shadow:0 0 0 4px rgba(251,113,133,.16),0 16px 48px -10px rgba(251,113,133,.85)}}
+button.go.stop{animation:btnPulse 2.2s var(--ease) infinite}
 
 /* ── KPI row ── */
 .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:1079px){.kpi-row{grid-template-columns:repeat(2,1fr)}}
+.kpi-card{position:relative;border-radius:16px;padding:16px 18px;overflow:hidden;
+  display:flex;flex-direction:column;gap:7px;
+  transition:border-color .25s,transform .25s var(--ease),box-shadow .35s}
+.kpi-card:hover{transform:translateY(-2px);border-color:rgba(34,211,238,.2);
+  box-shadow:0 20px 60px -28px rgba(34,211,238,.45)}
+.kpi-label{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:9.5px;
+  text-transform:uppercase;letter-spacing:.2em;color:var(--mist-dim);font-weight:500}
+.kpi-label svg{width:12px;height:12px;flex:none}
+.kpi-value{font-family:var(--display);font-size:30px;font-weight:600;line-height:1;
+  letter-spacing:-.035em;color:var(--fg-hi)}
+.kpi-sub{font-family:var(--mono);font-size:10px;color:var(--mist-dim);letter-spacing:.02em;
+  min-height:13px}
+@media(max-width:480px){.kpi-value{font-size:23px}.kpi-card{padding:13px 14px}}
+.kpi-rain .kpi-label svg{color:var(--rain)}
+.kpi-rain .kpi-value{color:var(--ice)}
+.kpi-sky  .kpi-label svg{color:var(--sky)}
+.kpi-sky  .kpi-value{color:#bfdbfe}
+.kpi-ok   .kpi-label svg{color:var(--ok)}
+.kpi-ok   .kpi-value{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+.kpi-mist .kpi-label svg{color:var(--mist)}
+.kpi-mist .kpi-value{color:#cbd5e1}
+.kpi-bar{height:3px;background:rgba(148,163,184,.12);border-radius:999px;overflow:hidden}
+.kpi-bar-fill{height:100%;width:0;border-radius:999px;background:var(--grad-btn);
+  transition:width .3s var(--ease)}
 
-.kpi-card{border:1px solid var(--border);border-radius:14px;
-  padding:16px 18px;backdrop-filter:blur(14px);
-  box-shadow:0 4px 20px rgba(5,3,20,.3);
-  transition:border-color .2s,box-shadow .2s;
-  display:flex;flex-direction:column;gap:6px;overflow:hidden;position:relative}
-.kpi-card:hover{border-color:var(--border-hi);
-  box-shadow:0 6px 28px rgba(5,3,20,.45)}
-.kpi-blue  {background:linear-gradient(145deg,rgba(16,12,40,.7),rgba(79,140,255,.07))}
-.kpi-purple{background:linear-gradient(145deg,rgba(16,12,40,.7),rgba(168,85,247,.07))}
-.kpi-cyan  {background:linear-gradient(145deg,rgba(16,12,40,.7),rgba(34,211,238,.07))}
-.kpi-muted {background:rgba(16,12,40,.65)}
-.kpi-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;
-  color:var(--muted);font-weight:700}
-.kpi-value{font-size:28px;font-weight:700;line-height:1;letter-spacing:-.02em;
-  transition:color .15s}
-@media(max-width:480px){.kpi-value{font-size:22px}.kpi-card{padding:12px 14px}}
-.kpi-blue  .kpi-value{color:var(--blue)}
-.kpi-purple .kpi-value{color:var(--purple)}
-.kpi-cyan  .kpi-value{color:var(--cyan)}
-.kpi-muted .kpi-value{color:var(--muted)}
-.kpi-bar{height:3px;background:rgba(79,140,255,.15);border-radius:999px;
-  margin-top:2px;overflow:hidden}
-.kpi-bar-fill{height:100%;width:0;background:var(--blue);border-radius:999px;
-  transition:width .3s ease}
-
-/* ── Progress bar ── */
-.progress-area{display:flex;flex-direction:column;gap:5px}
-.pbar-thin{height:6px;background:rgba(10,9,28,.7);border-radius:999px;
-  overflow:hidden;border:1px solid var(--border)}
-#pfill{height:100%;width:0;
-  background:linear-gradient(90deg,var(--blue),var(--purple),var(--pink),var(--blue));
-  background-size:200% 100%;transition:width .25s ease}
-@keyframes flow{to{background-position:200% 0}}
-.pbar-thin.scanning #pfill{animation:flow 2.5s linear infinite}
-.ptext{font-family:var(--mono);font-size:11px;color:var(--muted)}
+/* ── Progress ── */
+.progress-area{display:flex;flex-direction:column;gap:7px}
+.pbar-thin{position:relative;height:6px;border-radius:999px;overflow:hidden;
+  background:rgba(148,163,184,.1);border:1px solid var(--line)}
+#pfill{height:100%;width:0;border-radius:999px;
+  background:linear-gradient(90deg,#a5f3fc,#22d3ee,#60a5fa,#a78bfa,#a5f3fc);
+  background-size:200% 100%;transition:width .25s var(--ease)}
+@keyframes flow{to{background-position:-200% 0}}
+.pbar-thin.scanning #pfill{animation:flow 2.6s linear infinite}
+.ptext{font-family:var(--mono);font-size:11px;color:var(--mist-dim);letter-spacing:.01em}
 
 /* ── Cards ── */
-.card{background:var(--panel);border:1px solid var(--border);border-radius:14px;
-  overflow:hidden;display:flex;flex-direction:column;backdrop-filter:blur(14px);
-  box-shadow:0 8px 30px rgba(5,3,20,.35);transition:border-color .2s,box-shadow .2s}
-.card:hover{border-color:var(--border-hi)}
-.card h3{margin:0;padding:10px 14px;font-size:11px;font-weight:700;
-  text-transform:uppercase;letter-spacing:.05em;color:var(--muted);
-  border-bottom:1px solid var(--border);
-  display:flex;justify-content:space-between;align-items:center;gap:8px}
-.card h3 .count{font-size:11px;font-weight:400;text-transform:none;
-  letter-spacing:0;color:var(--muted)}
-.tag{font-size:11px;font-weight:400;color:var(--muted);
-  text-transform:none;letter-spacing:0}
+.card{position:relative;border-radius:16px;overflow:hidden;display:flex;flex-direction:column;
+  transition:border-color .25s,box-shadow .35s}
+.card:hover{border-color:rgba(34,211,238,.18)}
+.card>h3{margin:0;padding:12px 15px;font-family:var(--mono);font-size:9.5px;font-weight:500;
+  text-transform:uppercase;letter-spacing:.2em;color:var(--mist-dim);
+  border-bottom:1px solid var(--line);
+  display:flex;justify-content:space-between;align-items:center;gap:9px}
+.card>h3 .h3l{display:flex;align-items:center;gap:8px;min-width:0}
+.card>h3 svg.ic{width:13px;height:13px;color:var(--rain);flex:none}
+.card>h3 .count,.card>h3 .tag{font-family:var(--mono);font-size:10px;font-weight:400;
+  text-transform:none;letter-spacing:.02em;color:var(--mist-dim);white-space:nowrap}
 
-/* ── Main row ── */
 .main-row{display:grid;grid-template-columns:1fr 2fr 1.4fr;gap:14px}
+@media(max-width:1079px){.main-row{grid-template-columns:1fr 1.6fr}}
 @media(max-width:767px){.main-row{grid-template-columns:1fr}}
-
-/* ── Config row ── */
 .config-row{display:grid;grid-template-columns:2fr 3fr;gap:14px}
 @media(max-width:767px){.config-row{grid-template-columns:1fr}}
 
 /* ── Live log ── */
-#log{font-family:var(--mono);font-size:12px;line-height:1.6;padding:12px 14px;
-  white-space:pre-wrap;height:280px;overflow:auto;color:#c9d1d9}
+.logwrap{position:relative;flex:1;overflow:hidden}
+#log{font-family:var(--mono);font-size:11.5px;line-height:1.65;padding:13px 15px;
+  white-space:pre-wrap;word-break:break-word;height:290px;overflow:auto;color:#cbd5e1}
 #log .l-ok{color:var(--ok)}
 #log .l-err{color:var(--err)}
-#log .l-sys{color:var(--accent)}
-#log div:hover{background:rgba(124,108,255,.07);
-  border-radius:4px;margin:0 -4px;padding:0 4px}
+#log .l-sys{color:var(--rain)}
+#log div{border-radius:5px;margin:0 -5px;padding:0 5px;transition:background .15s}
+#log div:hover{background:rgba(34,211,238,.06)}
+@keyframes scanline{0%{transform:translateY(-100%);opacity:0}12%{opacity:1}
+  88%{opacity:1}100%{transform:translateY(1400%);opacity:0}}
+.scanline{position:absolute;left:0;right:0;top:0;height:22px;pointer-events:none;display:none;
+  background:linear-gradient(180deg,rgba(34,211,238,0),rgba(34,211,238,.085));
+  border-bottom:1px solid rgba(103,232,249,.35)}
+body.scanning .scanline{display:block;animation:scanline 5.5s var(--ease) infinite}
+@keyframes shimmer-bar{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.shimmer{height:2px;background-size:200% 100%;opacity:0;transition:opacity .3s;
+  background-image:linear-gradient(100deg,rgba(34,211,238,.12) 30%,rgba(34,211,238,.4) 50%,rgba(34,211,238,.12) 70%)}
+body.scanning .shimmer{opacity:1;animation:shimmer-bar 2.4s linear infinite}
 
 /* ── Scrollboxes ── */
-.scrollbox{font-family:var(--mono);font-size:12px;line-height:1.6;
-  padding:12px 14px;white-space:pre-wrap;word-break:break-all;
-  overflow:auto;color:#c9d1d9}
-.ranges-box{height:280px}
-.ips-box{height:100px}
-.config-box{min-height:160px}
+.scrollbox{font-family:var(--mono);font-size:11.5px;line-height:1.65;padding:13px 15px;
+  white-space:pre-wrap;word-break:break-all;overflow:auto;color:#cbd5e1}
+.ranges-box{height:290px}
+.ips-box{height:106px}
+.config-box{min-height:168px}
 
 /* ── Sub-labels + copy ── */
-.sub{padding:7px 14px 0;display:flex;justify-content:space-between;align-items:center}
-.sub-label{font-size:11px;font-weight:700}
-.sub-label.blue{color:var(--blue)}
-.sub-label.cyan{color:var(--cyan)}
-.copy{background:rgba(124,108,255,.08);border:1px solid var(--border);color:#c9c1f0;
-  cursor:pointer;padding:3px 10px;font-size:11px;border-radius:999px;
-  font-family:'Space Grotesk',sans-serif;transition:all .15s}
-.copy:hover{border-color:var(--purple);color:#fff;background:rgba(124,108,255,.2)}
+.sub{padding:9px 15px 0;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.sub-label{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;
+  font-weight:500;text-transform:uppercase;letter-spacing:.14em}
+.sub-label .dot{width:5px;height:5px;border-radius:50%;flex:none}
+.sub-label.blue{color:var(--sky)}
+.sub-label.blue .dot{background:var(--sky);box-shadow:0 0 0 3px rgba(96,165,250,.14)}
+.sub-label.cyan{color:var(--rain)}
+.sub-label.cyan .dot{background:var(--rain);box-shadow:0 0 0 3px rgba(34,211,238,.16)}
+.copy{background:rgba(255,255,255,.04);border:1px solid var(--line);color:var(--mist);
+  cursor:pointer;padding:4px 11px;font-size:10.5px;font-weight:500;border-radius:999px;
+  font-family:var(--body);transition:all .18s}
+.copy:hover{border-color:rgba(34,211,238,.35);color:var(--fg-hi);background:rgba(34,211,238,.1)}
+.copy:disabled{opacity:.45;cursor:not-allowed}
 
-/* ── Empty state ── */
-.empty{color:var(--muted);padding:16px 14px;font-size:12px}
+.empty{color:var(--mist-dim);padding:16px 15px;font-size:12px;font-family:var(--body)}
 
 /* ── Modal ── */
-.overlay{position:fixed;inset:0;background:rgba(5,3,20,.65);backdrop-filter:blur(6px);
-  display:none;align-items:center;justify-content:center;z-index:100}
+.overlay{position:fixed;inset:0;background:rgba(2,6,14,.72);backdrop-filter:blur(8px);
+  display:none;align-items:center;justify-content:center;z-index:100;padding:18px}
 .overlay.show{display:flex}
-.modal{background:var(--panel-solid);border-radius:18px;width:500px;max-width:94vw;
-  padding:26px;box-shadow:0 24px 70px rgba(0,0,0,.55);
-  position:relative;animation:fadeUp .25s ease both}
-.modal::before{content:'';position:absolute;inset:-1px;border-radius:19px;
-  background:linear-gradient(135deg,var(--purple),var(--pink));
-  opacity:.4;pointer-events:none;z-index:-1}
-.modal h2{margin:0 0 4px;font-size:17px;font-weight:700;
-  background:var(--grad);-webkit-background-clip:text;background-clip:text;
-  color:transparent}
-.modal .mhint{color:var(--muted);font-size:12px;margin-bottom:8px}
-.modal .mbtns{display:flex;gap:10px;margin-top:18px;justify-content:flex-end}
-.modal button{padding:9px 18px;border-radius:9px;cursor:pointer;
-  font-size:13px;font-weight:700;border:1px solid var(--border);
-  font-family:'Space Grotesk',sans-serif;transition:transform .15s,box-shadow .2s}
-.modal .save{background:var(--grad);border:0;color:#fff;
-  box-shadow:0 4px 14px rgba(168,85,247,.4)}
-.modal .save:hover{transform:translateY(-1px);
-  box-shadow:0 7px 20px rgba(168,85,247,.55)}
-.modal .cancel{background:transparent;color:var(--muted)}
-.modal .cancel:hover{color:var(--fg)}
+.modal{border-radius:20px;width:540px;max-width:100%;max-height:92vh;overflow-y:auto;
+  padding:26px;position:relative;
+  box-shadow:0 34px 90px -20px rgba(0,0,0,.85);
+  animation:fadeUp .28s var(--ease) both}
+.modal h2{margin:0 0 6px;font-family:var(--display);font-size:19px;font-weight:600;
+  letter-spacing:-.02em}
+.modal .mhint{color:var(--mist-dim);font-size:12px;margin-bottom:10px;line-height:1.55}
+.modal .mbtns{display:flex;gap:10px;margin-top:20px;justify-content:flex-end}
+.modal button{padding:9px 20px;border-radius:999px;cursor:pointer;font-size:13px;
+  font-weight:600;border:1px solid var(--line);font-family:var(--body);
+  transition:transform .18s var(--ease),box-shadow .22s,color .2s,border-color .2s}
+.modal .save{background:var(--grad-btn);border:0;color:#0b1220;
+  box-shadow:0 10px 32px -10px rgba(34,211,238,.7)}
+.modal .save:hover{transform:translateY(-1px);box-shadow:0 16px 40px -12px rgba(34,211,238,.9)}
+.modal .cancel{background:transparent;color:var(--mist)}
+.modal .cancel:hover{color:var(--fg-hi);border-color:rgba(255,255,255,.24)}
+.modal .count{font-family:var(--mono);font-size:10px;color:var(--mist-dim)}
 
-/* ── Keyframes ── */
-@keyframes fadeUp{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+/* ── Keyframes / entrance ── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(18px);filter:blur(6px)}
+  to{opacity:1;transform:none;filter:blur(0)}}
 @keyframes fadeDown{from{opacity:0;transform:translateY(-14px)}to{opacity:1;transform:none}}
-@keyframes glow{
-  0%,100%{box-shadow:0 0 0 1px rgba(139,92,246,.4),0 0 14px rgba(79,140,255,.5)}
-  50%    {box-shadow:0 0 0 1px rgba(236,72,153,.45),0 0 26px rgba(168,85,247,.8)}}
-@keyframes kpiPulse{
-  0%  {box-shadow:0 4px 20px rgba(5,3,20,.3)}
-  50% {box-shadow:0 0 0 3px rgba(168,85,247,.45),0 8px 32px rgba(168,85,247,.4)}
-  100%{box-shadow:0 4px 20px rgba(5,3,20,.3)}}
-@keyframes btnPulse{
-  0%,100%{box-shadow:0 6px 22px rgba(124,108,255,.38)}
-  50%    {box-shadow:0 0 0 4px rgba(236,72,153,.3),0 12px 30px rgba(168,85,247,.6)}}
-@keyframes sparkle{
-  0%  {text-shadow:none}
-  50% {text-shadow:0 0 16px var(--cyan),0 0 32px rgba(34,211,238,.5)}
+.kpi-card:nth-child(1){animation:fadeUp .6s .00s var(--ease) both}
+.kpi-card:nth-child(2){animation:fadeUp .6s .06s var(--ease) both}
+.kpi-card:nth-child(3){animation:fadeUp .6s .12s var(--ease) both}
+.kpi-card:nth-child(4){animation:fadeUp .6s .18s var(--ease) both}
+.main-row   .card:nth-child(1){animation:fadeUp .6s .10s var(--ease) both}
+.main-row   .card:nth-child(2){animation:fadeUp .6s .16s var(--ease) both}
+.main-row   .card:nth-child(3){animation:fadeUp .6s .22s var(--ease) both}
+.config-row .card:nth-child(1){animation:fadeUp .6s .18s var(--ease) both}
+.config-row .card:nth-child(2){animation:fadeUp .6s .24s var(--ease) both}
+
+@keyframes celebrate{0%{box-shadow:0 0 0 0 rgba(34,211,238,0)}
+  45%{box-shadow:0 0 0 3px rgba(34,211,238,.35),0 20px 60px -22px rgba(34,211,238,.8)}
+  100%{box-shadow:0 0 0 0 rgba(34,211,238,0)}}
+.kpi-card.celebrate{animation:celebrate .75s var(--ease)}
+@keyframes sparkle{0%{text-shadow:none}
+  50%{text-shadow:0 0 18px rgba(34,211,238,.85),0 0 36px rgba(34,211,238,.4)}
   100%{text-shadow:none}}
-
-/* ── Load stagger ── */
-.kpi-card:nth-child(1){animation:fadeUp .45s .00s ease both}
-.kpi-card:nth-child(2){animation:fadeUp .45s .06s ease both}
-.kpi-card:nth-child(3){animation:fadeUp .45s .12s ease both}
-.kpi-card:nth-child(4){animation:fadeUp .45s .18s ease both}
-.main-row  .card:nth-child(1){animation:fadeUp .45s .10s ease both}
-.main-row  .card:nth-child(2){animation:fadeUp .45s .16s ease both}
-.main-row  .card:nth-child(3){animation:fadeUp .45s .22s ease both}
-.config-row .card:nth-child(1){animation:fadeUp .45s .18s ease both}
-.config-row .card:nth-child(2){animation:fadeUp .45s .24s ease both}
-
-/* ── Scanning states ── */
-button.go.stop{animation:btnPulse 2s ease-in-out infinite}
-.kpi-card.celebrate{animation:kpiPulse .4s ease-out}
-.kpi-cyan .kpi-value.sparkle{animation:sparkle .6s ease-out forwards}
+.kpi-ok .kpi-value.sparkle{animation:sparkle .7s var(--ease) forwards}
 
 /* ── Reduced motion ── */
 @media(prefers-reduced-motion:reduce){
-  *,::before,::after{
-    animation-duration:.01ms!important;
-    animation-iteration-count:1!important;
+  *,::before,::after{animation-duration:.01ms!important;animation-iteration-count:1!important;
     transition-duration:.01ms!important}
-  .kpi-cyan .kpi-value.sparkle{animation:none}
+  .kpi-ok .kpi-value.sparkle{animation:none}
+  .scanline,.shimmer{display:none}
 }
 </style>
 </head>
 <body>
 
+<canvas id="rain" aria-hidden="true"></canvas>
+<div class="bg-layer bg-grid" aria-hidden="true"></div>
+<div class="bg-layer bg-glow" aria-hidden="true"></div>
 <div id="scrim"></div>
 
 <div class="page-body">
   <header>
-    <img class="logo" src="/static/logo.png" alt="RainScanner logo" />
+    <!-- logo-circle.png is the pre-cropped 256px variant: same artwork as
+         logo.png at 1/14th the bytes, and already round at this size. -->
+    <img class="logo" src="/static/logo-circle.png" alt="RainScanner logo" width="40" height="40" />
     <div class="brand">
       <!-- keep version in sync with the `version` const in cmd/cdnscan/main.go -->
-      <h1>RainScanner <span class="ver">v2.0.1</span></h1>
-      <span class="tag">unified CDN clean-IP scanner · real Xray latency</span>
+      <h1>Rain<span class="text-gradient">Scanner</span> <span class="ver">v2.0.1</span></h1>
+      <span class="tag">dual-stack CDN clean-IP scanner · real Xray latency</span>
     </div>
     <div class="xupd">
-      <button id="hamburger" class="hamburger" aria-label="Open menu">☰</button>
+      <button id="hamburger" class="hamburger" aria-label="Open menu">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+      </button>
       <a class="gh" href="https://github.com/IzumiRain/RainScanner" target="_blank" rel="noopener" title="View source on GitHub">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
-        GitHub
+        <span>GitHub</span>
       </a>
     </div>
   </header>
@@ -397,36 +462,71 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
     <aside id="drawer">
       <div class="sidebar-scroll">
         <div class="sec-title">
-          <span>Targets</span>
+          <span class="eyebrow"><span class="dot"></span>Targets</span>
           <div class="sec-actions">
             <div class="src-switch" title="Range source for reload/scan — GitHub: jsDelivr / GitHub raw mirror (use if a CDN API is blocked in your region). Official: each CDN's own API.">
               <button type="button" class="src-opt" data-bk="1">github</button>
               <button type="button" class="src-opt on" data-bk="0">official api</button>
             </div>
             <input type="checkbox" id="prefer_backup" hidden />
-            <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs. Restores built-in defaults from GitHub (deleted built-ins come back); your custom CDNs are kept."><span class="ra-ic">⟳</span></button>
+            <button id="reloadAll" class="reload-all" title="Re-fetch ranges for all CDNs. Restores built-in defaults from GitHub (deleted built-ins come back); your custom CDNs are kept.">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg>
+            </button>
           </div>
         </div>
         <div class="cdns" id="cdns"></div>
-        <div class="addcustom" id="addcustom">+ Add custom</div>
+        <div class="addcustom" id="addcustom">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+          Add custom
+        </div>
 
         <div class="sidebar-divider"></div>
 
         <details class="adv">
-          <summary><span class="adv-ico">▸</span><span style="font-size:13px">⚙</span> Advanced settings</summary>
+          <summary>
+            <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><line x1="4" x2="4" y1="21" y2="14"/><line x1="4" x2="4" y1="10" y2="3"/><line x1="12" x2="12" y1="21" y2="12"/><line x1="12" x2="12" y1="8" y2="3"/><line x1="20" x2="20" y1="21" y2="16"/><line x1="20" x2="20" y1="12" y2="3"/><line x1="1" x2="7" y1="14" y2="14"/><line x1="9" x2="15" y1="8" y2="8"/><line x1="17" x2="23" y1="16" y2="16"/></svg>
+            Advanced settings
+            <span class="chev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></span>
+          </summary>
           <div class="adv-body">
+
             <div class="adv-group">
-              <div class="gh"><span>🌐</span> Network</div>
+              <div class="gh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+                Network
+              </div>
               <label>Ports to scan (comma-separated)</label>
               <input type="text" id="ports" value="443" placeholder="443,80,8080,2053,2096" />
               <div class="hint">Each candidate IP is TCP-tested on every port. Default: 443.</div>
               <label>Xray binary path</label>
               <input type="text" id="xray" placeholder="auto (PATH)" />
             </div>
+
             <div class="adv-group">
-              <div class="gh"><span>⚡</span> Performance</div>
+              <div class="gh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="16" y="16" width="6" height="6" rx="1"/><rect x="2" y="16" width="6" height="6" rx="1"/><rect x="9" y="2" width="6" height="6" rx="1"/><path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/><path d="M12 12V8"/></svg>
+                Address family
+              </div>
+              <label>Families to scan</label>
+              <select id="family">
+                <option value="auto">auto — IPv6 too, if this PC has it</option>
+                <option value="both">both — force dual-stack</option>
+                <option value="ipv4">IPv4 only</option>
+                <option value="ipv6">IPv6 only</option>
+              </select>
+              <div class="hint">Auto scans both families when this machine has a global IPv6 address, and IPv4 only when it doesn't.</div>
+              <label>Addresses sampled per IPv6 range</label>
+              <input type="number" id="maxhostv6" value="0" placeholder="0 = 256" />
+              <div class="hint">An IPv6 block can't be enumerated (a /64 holds 1.8×10¹⁹ hosts), so addresses are drawn at random from it. 0 = 256 per range.</div>
+            </div>
+
+            <div class="adv-group">
+              <div class="gh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                Performance
+              </div>
               <label class="switch"><input type="checkbox" id="lite" /><span class="track"></span>Lite mode (low-power — caps load on weak PCs)</label>
-              <div class="hint">Hard-caps concurrency (2 xray / 100 TCP). Leave blank for auto (CPU-scaled).</div>
+              <div class="hint">Hard-caps concurrency (1 xray / 100 TCP) and stops the background rain. Leave the fields blank for auto (CPU-scaled).</div>
               <div class="row">
                 <div><label>TCP concurrency</label><input type="number" id="tcpc" placeholder="auto" /></div>
                 <div><label>Xray procs</label><input type="number" id="xrayc" placeholder="auto" /></div>
@@ -434,8 +534,12 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
               </div>
               <div class="hint">Xray procs = simultaneous xray processes; batch = IPs tested per process.</div>
             </div>
+
             <div class="adv-group">
-              <div class="gh"><span>🎯</span> Stage 2 · Xray confirm</div>
+              <div class="gh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/></svg>
+                Stage 2 · Xray confirm
+              </div>
               <div class="row">
                 <div><label>Probes</label><input type="number" id="probes" value="5" /></div>
                 <div><label>Confirm</label><input type="number" id="confirm" value="3" /></div>
@@ -444,8 +548,12 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
               </div>
               <div class="hint">Probe timeout blank = auto (2× max latency, min 1.5s). Lower it to skip dead IPs faster.</div>
             </div>
+
             <div class="adv-group">
-              <div class="gh"><span>🎲</span> Sampling</div>
+              <div class="gh">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.8-1.1 2-1.7 3.3-1.7H22"/><path d="m18 2 4 4-4 4"/><path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2"/><path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8"/><path d="m18 14 4 4-4 4"/></svg>
+                Sampling
+              </div>
               <label>Random sample (max IPs to scan, 0 = all)</label>
               <input type="number" id="maxtotal" value="0" placeholder="0 = scan all" />
               <div class="hint">Randomly picks N IPs out of the whole pool. 0 scans everything.</div>
@@ -453,13 +561,18 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
                 <div><label>Sample per /24</label><input type="number" id="sample" value="0" /></div>
                 <div><label>Max hosts/CIDR</label><input type="number" id="maxhost" value="0" /></div>
               </div>
+              <div class="hint">IPv4 only — an IPv6 range uses its own cap above.</div>
               <label class="switch"><input type="checkbox" id="refresh" /><span class="track"></span>Force re-fetch provider ranges</label>
             </div>
+
           </div>
         </details>
       </div>
       <div class="sidebar-foot">
-        <button class="go" id="go">Start scan</button>
+        <button class="go" id="go">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></svg>
+          <span id="goLabel">Start scan</span>
+        </button>
       </div>
     </aside>
 
@@ -469,22 +582,39 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
 
         <!-- KPI row -->
         <div class="kpi-row">
-          <div class="kpi-card kpi-blue">
-            <div class="kpi-label">Hosts Scanned</div>
+          <div class="kpi-card frame spot-card kpi-rain">
+            <div class="hair"></div>
+            <div class="kpi-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
+              Hosts Scanned
+            </div>
             <div class="kpi-value" id="kpi-hosts">—</div>
+            <div class="kpi-sub" id="kpi-hosts-sub"></div>
             <div class="kpi-bar"><div class="kpi-bar-fill" id="kpi-hosts-bar"></div></div>
           </div>
-          <div class="kpi-card kpi-purple">
-            <div class="kpi-label">TCP Open</div>
+          <div class="kpi-card frame spot-card kpi-sky">
+            <div class="kpi-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 12 2 2 4-4"/><path d="M5 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z"/></svg>
+              TCP Open
+            </div>
             <div class="kpi-value" id="kpi-tcp">—</div>
+            <div class="kpi-sub" id="kpi-tcp-sub"></div>
           </div>
-          <div class="kpi-card kpi-cyan">
-            <div class="kpi-label">Confirmed IPs</div>
+          <div class="kpi-card frame spot-card kpi-ok">
+            <div class="kpi-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
+              Confirmed IPs
+            </div>
             <div class="kpi-value" id="kpi-confirmed">—</div>
+            <div class="kpi-sub" id="kpi-confirmed-sub"></div>
           </div>
-          <div class="kpi-card kpi-muted">
-            <div class="kpi-label">Ranges Loaded</div>
+          <div class="kpi-card frame spot-card kpi-mist">
+            <div class="kpi-label">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
+              Ranges Loaded
+            </div>
             <div class="kpi-value" id="kpi-ranges">—</div>
+            <div class="kpi-sub" id="kpi-ranges-sub"></div>
           </div>
         </div>
 
@@ -496,23 +626,44 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
 
         <!-- Main row: Ranges | Log | Valid IPs -->
         <div class="main-row">
-          <div class="card">
-            <h3>Selected Ranges <span class="count" id="rangesCount"></span></h3>
+          <div class="card frame">
+            <h3>
+              <span class="h3l">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/></svg>
+                Selected Ranges
+              </span>
+              <span class="count" id="rangesCount"></span>
+            </h3>
             <div id="ranges" class="scrollbox ranges-box"><div class="empty">Pick a target to preview its ranges.</div></div>
           </div>
-          <div class="card">
-            <h3>Live Log <span id="status" class="tag"></span></h3>
-            <div id="log"></div>
+          <div class="card frame">
+            <h3>
+              <span class="h3l">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19.07 4.93A10 10 0 0 0 6.99 3.34"/><path d="M4 6h.01"/><path d="M2.29 9.62A10 10 0 1 0 21.31 8.35"/><path d="M16.24 7.76A6 6 0 1 0 8.23 16.67"/><path d="M12 18h.01"/><path d="M17.99 11.66A6 6 0 0 1 15.77 16.67"/><circle cx="12" cy="12" r="2"/><path d="m13.41 10.59 5.66-5.66"/></svg>
+                Live Log
+              </span>
+              <span id="status" class="tag">idle</span>
+            </h3>
+            <div class="logwrap">
+              <div class="scanline"></div>
+              <div id="log"></div>
+            </div>
+            <div class="shimmer"></div>
           </div>
-          <div class="card">
-            <h3>Valid IPs</h3>
+          <div class="card frame">
+            <h3>
+              <span class="h3l">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/></svg>
+                Valid IPs
+              </span>
+            </h3>
             <div class="sub">
-              <span class="sub-label blue">TCP reachable <span id="tcpCount"></span></span>
+              <span class="sub-label blue"><span class="dot"></span>TCP reachable <span id="tcpCount"></span></span>
               <button class="copy" id="copyTcp">copy IPs</button>
             </div>
             <div id="tcpips" class="scrollbox ips-box"><div class="empty">No scan yet.</div></div>
             <div class="sub" id="xraySub" style="display:none">
-              <span class="sub-label cyan">Xray confirmed <span id="xrayCount"></span></span>
+              <span class="sub-label cyan"><span class="dot"></span>Xray confirmed <span id="xrayCount"></span></span>
               <button class="copy" id="copyXray">copy IPs</button>
             </div>
             <div id="xrayips" class="scrollbox ips-box" style="display:none"></div>
@@ -521,16 +672,27 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
 
         <!-- Config row -->
         <div class="config-row">
-          <div class="card">
-            <h3>Optional config <span class="count">one link</span></h3>
-            <div style="padding:12px 14px">
+          <div class="card frame">
+            <h3>
+              <span class="h3l">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                Optional config
+              </span>
+              <span class="count">one link</span>
+            </h3>
+            <div style="padding:13px 15px">
               <input type="text" id="link" placeholder="vless://uuid@host:443?…  (empty = TCP-only mode)" />
-              <div class="hint">Paste a single share link. Leave empty for TCP-only. Confirmed clean IPs are substituted into this config.</div>
+              <div class="hint">Paste a single share link. Leave empty for TCP-only. Confirmed clean IPs are substituted into this config — an IPv6 result is bracketed automatically.</div>
             </div>
           </div>
-          <div class="card">
-            <h3>Output configs (clean IP inside)
-              <button class="copy" id="copyConfigs" style="display:none">copy all</button></h3>
+          <div class="card frame">
+            <h3>
+              <span class="h3l">
+                <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></svg>
+                Output configs (clean IP inside)
+              </span>
+              <button class="copy" id="copyConfigs" style="display:none">copy all</button>
+            </h3>
             <div id="configs" class="scrollbox config-box"><div class="empty">Provide an optional config to get ready-to-use links here.</div></div>
           </div>
         </div>
@@ -543,21 +705,21 @@ button.go.stop{animation:btnPulse 2s ease-in-out infinite}
 
 <!-- target editor modal -->
 <div class="overlay" id="overlay">
-  <div class="modal">
-    <h2 id="mTitle">Add custom range</h2>
-    <div class="mhint">Name it, paste one CIDR (or bare IP) per line, and optionally give an API URL to reload ranges from.</div>
+  <div class="modal frame-bright">
+    <h2 id="mTitle" class="text-gradient">Add custom range</h2>
+    <div class="mhint">Name it, paste one CIDR (or bare IP) per line — IPv4 and IPv6 both welcome — and optionally give an API URL to reload ranges from.</div>
     <label>name</label>
     <input type="text" id="cName" placeholder="example name" />
     <label>api url (optional)</label>
     <div class="row" style="align-items:stretch">
       <div style="flex:1"><input type="text" id="cUrl" placeholder="https://provider/ips.txt  (leave blank for manual ranges)" /></div>
-      <button class="copy" id="cReload" style="white-space:nowrap;padding:0 12px">⟳ Reload range IPs</button>
+      <button class="copy" id="cReload" style="white-space:nowrap;padding:0 14px">⟳ Reload range IPs</button>
     </div>
     <div class="hint" id="cReloadMsg"></div>
     <label>ip ranges <span id="cRangeCount" class="count"></span></label>
-    <textarea id="cRanges" rows="7" placeholder="1.2.3.0/24&#10;4.5.6.7/32&#10;7.8.9.0/16"></textarea>
+    <textarea id="cRanges" rows="7" placeholder="1.2.3.0/24&#10;4.5.6.7/32&#10;2606:4700::/32"></textarea>
     <div class="mbtns">
-      <button class="cancel" id="cDelete" style="margin-right:auto;color:var(--err);border-color:var(--err);display:none">Delete</button>
+      <button class="cancel" id="cDelete" style="margin-right:auto;color:var(--err);border-color:rgba(251,113,133,.4);display:none">Delete</button>
       <button class="cancel" id="cCancel">Cancel</button>
       <button class="save" id="cSave">Save</button>
     </div>
@@ -572,7 +734,9 @@ let editingName = null;   // name being edited in the modal (null = new custom)
 let es = null;
 let scanStart = 0, stageKey = '', stageStart = 0;
 
-// ── KPI helper ──
+const PENCIL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>';
+
+// ── KPI helpers ──
 function updateKPI(id, val){
   const el = $(id); if(!el) return;
   const s = (val===null||val===undefined) ? '—' : Number(val).toLocaleString();
@@ -581,6 +745,17 @@ function updateKPI(id, val){
   if(id==='kpi-confirmed' && typeof val==='number' && val>0){
     el.classList.remove('sparkle'); void el.offsetWidth; el.classList.add('sparkle');
   }
+}
+// A CIDR/IP is IPv6 iff it contains a colon — enough to split a list the server
+// has already validated, and it keeps the preview free of a parser.
+function famSplit(entries){
+  let v4=0, v6=0;
+  (entries||[]).forEach(e => String(e).includes(':') ? v6++ : v4++);
+  return {v4, v6};
+}
+function setSub(id, v4, v6){
+  const el=$(id); if(!el) return;
+  el.textContent = (v4||v6) ? (v4.toLocaleString()+' IPv4 · '+v6.toLocaleString()+' IPv6') : '';
 }
 
 function updateProgress(p){
@@ -594,8 +769,10 @@ function updateProgress(p){
   const name = p.stage === 'tcp' ? 'TCP scan' : 'Xray latency';
   $('ptext').textContent = `${p.cdn} · ${name} ${p.done}/${p.total} (${pct}%) · elapsed ${elapsed}s · ETA ${eta}s`;
   if(p.stage === 'tcp'){
+    // p.done counts dials completed, not open ports — the open count only exists
+    // once stage 1 finishes, so TCP Open is filled in from the result event.
     updateKPI('kpi-hosts', p.total);
-    updateKPI('kpi-tcp', p.done);
+    $('kpi-tcp-sub').textContent = p.done.toLocaleString()+' / '+p.total.toLocaleString()+' dialled';
     const bar = $('kpi-hosts-bar'); if(bar) bar.style.width = pct + '%';
   }
   document.querySelector('.pbar-thin').classList.add('scanning');
@@ -611,15 +788,18 @@ function renderTargets(){
 }
 function pickEl(t){
   const el=document.createElement('div');
-  el.className='pick'+(t.builtin?'':' custom');
+  el.className='pick spot-card'+(t.builtin?'':' custom');
   el.dataset.name = t.name;
+  const s = famSplit(t.cidrs);
   const n = (t.cidrs||[]).length;
-  const badge = `${n} range(s)`;
-  el.innerHTML = `<span>${esc(t.name)}</span>`+
-    `<span class="right"><span class="badge">${badge}</span><span class="edit" title="edit">✎</span></span>`;
-  el.querySelector('span').onclick = ()=>selectTarget(t);
-  el.onclick = e=>{ if(!e.target.classList.contains('edit')) selectTarget(t); };
+  const badge = s.v6 ? `${n} · v4+v6` : `${n} range(s)`;
+  el.title = `${n} range(s) — ${s.v4} IPv4 / ${s.v6} IPv6`;
+  el.innerHTML = `<span class="nm">${esc(t.name)}</span>`+
+    `<span class="right"><span class="badge">${badge}</span><span class="edit" title="edit">${PENCIL}</span></span>`;
+  el.querySelector('.nm').onclick = ()=>selectTarget(t);
+  el.onclick = e=>{ if(!e.target.closest('.edit')) selectTarget(t); };
   el.querySelector('.edit').onclick = e=>{ e.stopPropagation(); openEdit(t.name); };
+  el.onmousemove = spotMove;
   return el;
 }
 function selectTarget(t){
@@ -637,7 +817,6 @@ async function loadTargets(keepSelection){
   const prev = target && target.name;
   targets = await (await fetch('/api/targets')).json() || [];
   renderTargets();
-  updateKPI('kpi-ranges', targets.length);
   if(!targets.length){ target=null; return; }
   let pick = null;
   if(keepSelection && prev) pick = targets.find(t=>t.name===prev);
@@ -646,9 +825,12 @@ async function loadTargets(keepSelection){
 }
 function showRanges(cidrs){
   cidrs = cidrs||[];
-  $('rangesCount').textContent = cidrs.length ? cidrs.length+' CIDR' : '';
+  const s = famSplit(cidrs);
+  $('rangesCount').textContent = cidrs.length ? (s.v6 ? `${cidrs.length} CIDR · ${s.v4}/${s.v6}` : cidrs.length+' CIDR') : '';
   $('ranges').textContent = cidrs.length ? cidrs.join('\n') : '';
   if(!cidrs.length) $('ranges').innerHTML='<div class="empty">no ranges</div>';
+  updateKPI('kpi-ranges', cidrs.length || null);
+  setSub('kpi-ranges-sub', s.v4, s.v6);
 }
 
 async function reloadAllCdns(){
@@ -686,8 +868,21 @@ function fillBox(boxId, lines, emptyMsg){
   else { $(boxId).innerHTML = '<div class="empty">'+emptyMsg+'</div>'; }
 }
 function renderResult(d){
+  if(typeof d.ranges === 'number' && d.ranges){
+    updateKPI('kpi-ranges', d.ranges);
+    setSub('kpi-ranges-sub', d.ranges_v4||0, d.ranges_v6||0);
+  }
+  if(typeof d.hosts === 'number' && d.hosts){
+    updateKPI('kpi-hosts', d.hosts);
+    setSub('kpi-hosts-sub', d.hosts_v4||0, d.hosts_v6||0);
+  }
+  const tcp = d.tcp_ips || [];
+  updateKPI('kpi-tcp', typeof d.tcp_open === 'number' ? d.tcp_open : tcp.length);
+  const ts = famSplit(tcp);
+  setSub('kpi-tcp-sub', ts.v4, ts.v6);
+
   fillBox('tcpips', d.tcp_ips, 'No TCP-reachable IPs.');
-  $('tcpCount').textContent = '('+(d.tcp_ips?d.tcp_ips.length:0)+')';
+  $('tcpCount').textContent = '('+tcp.length+')';
   const hasXray = d.configs && d.configs.length || d.confirmed_ips && d.confirmed_ips.length;
   $('xraySub').style.display = hasXray ? 'flex' : 'none';
   $('xrayips').style.display = hasXray ? 'block' : 'none';
@@ -695,6 +890,8 @@ function renderResult(d){
     fillBox('xrayips', d.confirmed_ips, 'None passed Xray.');
     $('xrayCount').textContent = '('+(d.confirmed_ips?d.confirmed_ips.length:0)+')';
     updateKPI('kpi-confirmed', d.confirmed_ips ? d.confirmed_ips.length : 0);
+    const cs = famSplit(d.confirmed_ips);
+    setSub('kpi-confirmed-sub', cs.v4, cs.v6);
   }
   if(d.configs && d.configs.length){
     $('configs').textContent = d.configs.join('\n');
@@ -706,9 +903,10 @@ function renderResult(d){
 }
 
 function setRunning(on){
-  $('go').textContent = on?'Stop':'Start scan';
+  $('goLabel').textContent = on?'Stop':'Start scan';
   $('go').className = on?'go stop':'go';
   $('status').textContent = on?'running…':'idle';
+  document.body.classList.toggle('scanning', on);
   if(on) closeDrawer();
 }
 
@@ -724,6 +922,8 @@ async function start(){
 
   $('log').innerHTML=''; setRunning(true);
   updateKPI('kpi-hosts',null); updateKPI('kpi-tcp',null); updateKPI('kpi-confirmed',null);
+  ['kpi-hosts-sub','kpi-tcp-sub','kpi-confirmed-sub'].forEach(id=>$(id).textContent='');
+  $('kpi-hosts-bar').style.width='0%';
   document.querySelector('.pbar-thin').classList.remove('scanning');
   $('tcpips').innerHTML='<div class="empty">scanning…</div>'; $('tcpCount').textContent='';
   $('xraySub').style.display='none'; $('xrayips').style.display='none';
@@ -737,6 +937,7 @@ async function start(){
     probes:+$('probes').value, confirm:+$('confirm').value, max_latency_ms:+$('maxlat').value,
     probe_timeout_ms:+$('probeto').value||0,
     sample_per_24:+$('sample').value, max_hosts_per_cidr:+$('maxhost').value,
+    family:$('family').value, max_hosts_per_v6_cidr:+$('maxhostv6').value||0,
     max_total:+$('maxtotal').value||0, refresh:$('refresh').checked,
     prefer_backup:$('prefer_backup').checked
   };
@@ -773,8 +974,9 @@ async function start(){
 
 // ── target editor modal ──
 function countRanges(){
-  const n=$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean).length;
-  $('cRangeCount').textContent = n? '('+n+')' : '';
+  const list=$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean);
+  const s=famSplit(list);
+  $('cRangeCount').textContent = list.length ? (s.v6 ? `(${list.length} — ${s.v4} IPv4 / ${s.v6} IPv6)` : '('+list.length+')') : '';
 }
 function openModal(){ $('cReloadMsg').textContent=''; $('overlay').classList.add('show'); countRanges(); $('cName').focus(); }
 function closeModal(){ $('overlay').classList.remove('show'); }
@@ -842,7 +1044,8 @@ async function reloadRanges(){
     if(!r.ok){ $('cReloadMsg').textContent='reload failed: '+await r.text(); return; }
     const rec=await r.json();
     $('cRanges').value=(rec.cidrs||[]).join('\n'); countRanges();
-    $('cReloadMsg').textContent='loaded '+(rec.cidrs?rec.cidrs.length:0)+' ranges';
+    const s=famSplit(rec.cidrs);
+    $('cReloadMsg').textContent='loaded '+(rec.cidrs?rec.cidrs.length:0)+' ranges — '+s.v4+' IPv4 / '+s.v6+' IPv6';
     loadTargets(true);
   }catch(e){ $('cReloadMsg').textContent='reload failed: '+e; }
   finally{ $('cReload').disabled=false; }
@@ -876,20 +1079,118 @@ document.querySelectorAll('.src-opt').forEach(btn=>{
 });
 $('overlay').onclick=e=>{ if(e.target===$('overlay')) closeModal(); };
 
-// Lite mode dims manual concurrency fields
+// Cursor spotlight for .spot-card surfaces (the sample's hover treatment).
+function spotMove(e){
+  const r=e.currentTarget.getBoundingClientRect();
+  e.currentTarget.style.setProperty('--mx',(e.clientX-r.left)+'px');
+  e.currentTarget.style.setProperty('--my',(e.clientY-r.top)+'px');
+}
+document.querySelectorAll('.kpi-card.spot-card').forEach(el=>el.onmousemove=spotMove);
+
+// Lite mode dims manual concurrency fields and stops the ambient rain, so a
+// low-power machine spends nothing on decoration.
 function syncLite(){
   const on=$('lite').checked;
   ['tcpc','xrayc','batch'].forEach(id=>{ $(id).disabled=on; $(id).style.opacity=on?.45:1; });
+  rain.setEnabled(!on);
 }
-$('lite').onchange=syncLite; syncLite();
+$('lite').onchange=syncLite;
 
 // ── drawer (mobile) ──
 function openDrawer(){ document.body.classList.add('drawer-open'); }
 function closeDrawer(){ document.body.classList.remove('drawer-open'); }
 $('hamburger').onclick = openDrawer;
 $('scrim').onclick     = closeDrawer;
-document.addEventListener('keydown', e=>{ if(e.key==='Escape') closeDrawer(); });
+document.addEventListener('keydown', e=>{
+  if(e.key!=='Escape') return;
+  closeDrawer();
+  if($('overlay').classList.contains('show')) closeModal();
+});
 
+// ══════════════════════════════════════════════════════════════════════════
+// Ambient rain + periodic scan sweep. Purely decorative: it never touches the
+// scan, respects prefers-reduced-motion, and switches off in Lite mode.
+// ══════════════════════════════════════════════════════════════════════════
+const rain = (() => {
+  const canvas = $('rain');
+  const ctx = canvas.getContext('2d', {alpha:true});
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let w=0, h=0, drops=[], raf=0, frame=0, enabled=false;
+  let wanted = true;      // what the user asked for (Lite mode owns this)
+  let sweepY = 2;         // > 1.05 so the first idle window schedules a sweep
+
+  const mk = () => ({
+    x: Math.random()*w, y: Math.random()*h,
+    len: 26+Math.random()*62, speed: 2.4+Math.random()*4.2,
+    op: .05+Math.random()*.22, wd: Math.random()>.82 ? 1.6 : 1,
+    hue: 188+Math.random()*22
+  });
+
+  function resize(){
+    const dpr = Math.min(window.devicePixelRatio||1, 2);
+    w = window.innerWidth; h = window.innerHeight;
+    canvas.width = Math.floor(w*dpr); canvas.height = Math.floor(h*dpr);
+    canvas.style.width = w+'px'; canvas.style.height = h+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    drops = Array.from({length: Math.floor((w*h)/16000)}, mk);
+    if(reduce || !enabled) paint(false);
+  }
+
+  function paint(advance){
+    ctx.clearRect(0,0,w,h);
+    for(const d of drops){
+      const g = ctx.createLinearGradient(d.x, d.y, d.x-2, d.y+d.len);
+      g.addColorStop(0, `hsla(${d.hue},95%,72%,0)`);
+      g.addColorStop(1, `hsla(${d.hue},95%,72%,${d.op})`);
+      ctx.strokeStyle = g; ctx.lineWidth = d.wd;
+      ctx.beginPath(); ctx.moveTo(d.x, d.y); ctx.lineTo(d.x-2, d.y+d.len); ctx.stroke();
+      if(!advance) continue;
+      d.y += d.speed; d.x -= .55;
+      if(d.y > h+d.len){ d.y = -d.len; d.x = Math.random()*w; }
+      if(d.x < -4){ d.x = w+4; }
+    }
+    if(advance && sweepY >= -0.05 && sweepY <= 1.05){
+      const y = sweepY*h;
+      const sg = ctx.createLinearGradient(0, y-96, 0, y);
+      sg.addColorStop(0, 'rgba(34,211,238,0)');
+      sg.addColorStop(1, 'rgba(34,211,238,0.075)');
+      ctx.fillStyle = sg; ctx.fillRect(0, y-96, w, 96);
+      ctx.fillStyle = 'rgba(103,232,249,0.35)'; ctx.fillRect(0, y, w, 1);
+      sweepY += .004;
+    }
+  }
+
+  function loop(){
+    frame++;
+    if(sweepY > 1.05 && frame % 560 === 0) sweepY = -0.04;
+    paint(true);
+    raf = requestAnimationFrame(loop);
+  }
+
+  function setEnabled(on){
+    wanted = on;
+    apply();
+  }
+  // apply() is the only place the loop starts or stops: the user's choice
+  // (Lite mode), reduced-motion, and tab visibility are ANDed together, so
+  // coming back to a visible tab restores whatever the user actually wanted.
+  function apply(){
+    const on = wanted && !reduce && !document.hidden;
+    if(on === enabled && raf) return;
+    enabled = on;
+    cancelAnimationFrame(raf); raf = 0;
+    if(enabled){ raf = requestAnimationFrame(loop); }
+    else { paint(false); }              // leave a still frame behind
+  }
+
+  window.addEventListener('resize', resize, {passive:true});
+  document.addEventListener('visibilitychange', apply);
+  resize();
+  apply();
+  return {setEnabled};
+})();
+
+syncLite();
 loadTargets(false);
 </script>
 </body>
