@@ -7,13 +7,13 @@
 <sub>written by Claude (Anthropic) · binary: <code>rainscan.exe</code> · Go module: <code>cdnscan</code></sub></p>
 
 <p align="center">
-  <code>v2.0.0</code> ·
+  <code>v2.1.0</code> ·
   <a href="changelog/CHANGELOG.md">Changelog</a> ·
   <strong>English</strong> · <a href="README.fa.md">🇮🇷 فارسی</a>
 </p>
 
-Finds CDN edge IPv4 addresses that actually work as Xray transports, ranked by
-**real proxied latency** (not ICMP/ping). Two stages:
+Finds CDN edge addresses — **IPv4 and IPv6** — that actually work as Xray
+transports, ranked by **real proxied latency** (not ICMP/ping). Two stages:
 
 1. **TCP pre-filter** — high-concurrency connect sweep on the target port(s) discards dead IPs.
 2. **Xray confirmation** — for each survivor, a generated Xray config dials the
@@ -21,16 +21,21 @@ Finds CDN edge IPv4 addresses that actually work as Xray transports, ranked by
    real HTTP requests through the proxy and measures end-to-end latency. Only IPs
    passing K-of-N probes within the latency budget are accepted.
 
-IPv4-only. IPv6 ranges are dropped.
+Dual-stack by default: IPv6 prefixes are pulled from every provider that
+publishes them (Cloudflare, CloudFront, Fastly, Gcore) and sampled safely — an
+IPv6 block can't be enumerated, so a bounded number of addresses is drawn from
+each one. `family=auto` scans IPv6 too when your machine has a global IPv6
+address, and falls back to IPv4 when it doesn't.
 
 ## 🌐 Supported CDNs
 
 Seven built-in defaults: `cloudflare`, `fastly`, `Gcore`, `cloudfront` (AWS CloudFront),
 `arvan` (ArvanCloud), `railway`, and `vercel`.
 
-- The first five pull their official published ranges automatically and cache them
-  as `ips/<cdn>.json`. `railway` and `vercel` have no public range API, so their
-  ranges ship with the repo and are maintained manually.
+- The first five pull their official published ranges automatically (both address
+  families) and cache them as `ips/<cdn>.json`. `railway` and `vercel` have no
+  public range API — nor does either publish IPv6 — so their ranges ship with
+  the repo and are maintained manually.
 - **Edit any built-in** (its ranges or API URL) or **delete** ones you don't use,
   right in the GUI. A deleted built-in comes back on the next *reload all*.
 - **Add your own** from the GUI (**Add custom +**) — a named set of CIDRs or bare
@@ -76,6 +81,11 @@ http://127.0.0.1:8787
 ./rainscan.exe -serve -addr 0.0.0.0:8787
 ```
 
+> ⚠️ **Non-loopback binds have no authentication.** `-addr 0.0.0.0:8787` makes the
+> control API reachable from your whole network: anyone on it can start scans,
+> edit targets and read results. RainScanner prints a warning when you do this —
+> bind to `127.0.0.1` unless you actually need LAN access.
+
 > Stage 1 (TCP scanning) needs nothing else. You only need an Xray config link for
 > **Stage 2** (real-latency confirmation).
 
@@ -109,7 +119,7 @@ now **Stop** — to cancel.
 ## 🖥️ The GUI, panel by panel
 
 ### Header
-Logo, app name and version (`v2.0.0`), and a link to the **GitHub** repo. On small
+Logo, app name and version (`v2.1.0`), and a link to the **GitHub** repo. On small
 screens, the menu button (☰) opens the sidebar.
 
 ### Targets sidebar
@@ -130,6 +140,12 @@ screens, the menu button (☰) opens the sidebar.
   - **Ports to scan** — comma-separated ports (e.g. `443,80`). Every IP is tested on
     each port. Default: `443`.
   - **Xray binary path** — path to the xray binary (blank = auto-detect).
+- **Address family**
+  - **Families to scan** — `auto` (IPv6 too, if this PC has global IPv6), `both`,
+    `IPv4 only`, `IPv6 only`.
+  - **Addresses sampled per IPv6 range** — an IPv6 block can't be enumerated
+    (a /64 holds 1.8×10¹⁹ hosts), so addresses are drawn at random from each
+    prefix. `0` = 256 per range.
 - **Performance**
   - **Lite mode** — low-power mode; caps concurrency for weak machines.
   - **TCP concurrency / Xray procs / Batch size** — parallelism (blank = auto,
@@ -263,12 +279,21 @@ Cached ranges live in `ips/<cdn>.json`; confirmed results in `results/<cdn>.json
 | `--xray-concurrency` | 32 | stage2 parallel xray processes |
 | `--probes` / `--confirm` | 5 / 3 | K-of-N latency confirmation |
 | `--max-latency` | 800ms | median latency budget |
-| `--sample-per-24` | 0 | sample N hosts per /24 (0 = full) |
+| `--sample-per-24` | 0 | sample N hosts per /24 (0 = full; IPv4 only) |
+| `--family` | auto | address families to scan: `auto\|ipv4\|ipv6\|both` |
+| `--max-hosts-per-v6-cidr` | 0 (= 256) | addresses sampled per IPv6 prefix |
 | `--refresh` | false | force re-fetch provider ranges |
 
 ## 🗒️ Changelog
 
 Full history is in **[`changelog/CHANGELOG.md`](changelog/CHANGELOG.md)**.
+
+**v2.1.0** — **IPv6 support end to end** (dual-stack range fetching, safe IPv6
+sampling, a `family` selector in the GUI and `-family` on the CLI), a rebuilt GUI
+in the sample design language, and security hardening from a full audit:
+cross-site request and DNS-rebinding guards, request body caps, random scan-job
+tokens, server-side ceiling clamps, HTTP timeouts, manifest-name validation, and
+SHA-pinned CI with xray checksum verification.
 
 **v2.0.0** — editable targets in the GUI, a `github ↔ official api` source switch,
 one-click `⟳ reload all` (restores deleted built-ins, keeps your customs),
