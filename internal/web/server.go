@@ -4,16 +4,21 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
-	"strconv"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"cdnscan/internal/app"
 	"cdnscan/internal/iprange"
@@ -31,9 +36,8 @@ var assets embed.FS
 type Server struct {
 	svc *app.Service
 
-	mu     sync.Mutex
-	jobs   map[string]*job
-	nextID int
+	mu   sync.Mutex
+	jobs map[string]*job
 
 	scanning atomic.Bool
 	cancel   context.CancelFunc
@@ -75,7 +79,50 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/stream", s.handleStream)
-	return http.Serve(ln, mux)
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: SSE streams stay open for the length of a scan.
+	}
+	return srv.Serve(ln)
+}
+
+// guardMutation rejects cross-site "simple requests" against state-changing
+// endpoints. Browsers attach an Origin header to every POST; a mismatching
+// Origin means the call did not come from this GUI, and a non-JSON content type
+// is exactly what a cross-origin page can send without a preflight. Non-browser
+// clients (curl) send neither header and pass, as does the embedded GUI, whose
+// same-origin requests carry a matching Origin.
+func guardMutation(w http.ResponseWriter, r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host && o != "https://"+r.Host {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		return false
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return false
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return true
+}
+
+// checkLocalXrayPath keeps request-supplied xray paths local. A UNC (or
+// scheme-like) path would make this process authenticate to — or execute a
+// binary from — a remote host; a path with separators must already exist as a
+// local regular file. Bare names are left for exec.LookPath (PATH resolution).
+func checkLocalXrayPath(p string) error {
+	if strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") {
+		return fmt.Errorf("xray_path must be a local path (remote/UNC paths are rejected)")
+	}
+	if strings.ContainsAny(p, `/\`) {
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			return fmt.Errorf("xray_path %q does not exist as a local file", p)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +181,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.svc.Targets())
 
 	case http.MethodPost:
+		if !guardMutation(w, r) {
+			return
+		}
 		var rec targets.Record
 		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -147,6 +197,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, saved)
 
 	case http.MethodDelete:
+		if !guardMutation(w, r) {
+			return
+		}
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			http.Error(w, "missing name", http.StatusBadRequest)
@@ -169,6 +222,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !guardMutation(w, r) {
 		return
 	}
 	var req struct {
@@ -195,6 +251,9 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !guardMutation(w, r) {
 		return
 	}
 	var req struct {
@@ -299,10 +358,29 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if !guardMutation(w, r) {
+		return
+	}
 	var req scanReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if len(req.Ports) > 64 {
+		http.Error(w, "too many ports (max 64)", http.StatusBadRequest)
+		return
+	}
+	for _, p := range req.Ports {
+		if p < 1 || p > 65535 {
+			http.Error(w, fmt.Sprintf("invalid port %d", p), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.XrayPath != "" {
+		if err := checkLocalXrayPath(req.XrayPath); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if req.Custom == nil && req.CDN == "" {
 		http.Error(w, "select a CDN or add a custom range", http.StatusBadRequest)
@@ -357,6 +435,9 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !guardMutation(w, r) {
 		return
 	}
 	s.mu.Lock()
@@ -449,20 +530,46 @@ type event struct {
 }
 
 type job struct {
-	id     string
-	mu     sync.Mutex
-	events []event
-	done   bool
-	ch     chan struct{} // replaced on each push to broadcast
+	id        string
+	createdAt time.Time
+	mu        sync.Mutex
+	events    []event
+	done      bool
+	ch        chan struct{} // replaced on each push to broadcast
 }
 
 func (s *Server) newJob() *job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.nextID++
-	j := &job{id: strconv.Itoa(s.nextID), ch: make(chan struct{})}
+	var b [16]byte
+	id := ""
+	if _, err := rand.Read(b[:]); err == nil {
+		id = hex.EncodeToString(b[:])
+	} else {
+		// crypto/rand failing means something is deeply wrong; fall back to a
+		// timestamp id rather than refusing to scan at all.
+		id = fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	j := &job{id: id, createdAt: time.Now(), ch: make(chan struct{})}
 	s.jobs[j.id] = j
+	s.sweepJobsLocked()
 	return j
+}
+
+// sweepJobsLocked bounds job retention. A finished job's event buffer can
+// contain credential-bearing generated configs, so finished jobs are kept for
+// one hour after completion (enough for a closed tab to be reopened) and then
+// dropped; the running job is never touched.
+func (s *Server) sweepJobsLocked() {
+	cutoff := time.Now().Add(-time.Hour)
+	for id, j := range s.jobs {
+		j.mu.Lock()
+		reap := j.done && j.createdAt.Before(cutoff)
+		j.mu.Unlock()
+		if reap {
+			delete(s.jobs, id)
+		}
+	}
 }
 
 func (j *job) push(e event) {
