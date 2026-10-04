@@ -31,9 +31,9 @@ jobs:
             xray_asset: Xray-linux-64.zip
             embed_dest: internal/xray/assets/xray-linux-amd64.zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod   # tracks the toolchain pinned in go.mod (go 1.26)
 
@@ -47,7 +47,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Verify the asset against the digest GitHub recorded at upload time
+          # before it is baked into every shipped binary.
+          digest=$(gh api repos/XTLS/Xray-core/releases/latest --jq ".assets[] | select(.name==\"$XRAY_ASSET\") | .digest")
           gh release download --repo XTLS/Xray-core --pattern "$XRAY_ASSET" --output "$EMBED_DEST" --clobber
+          got=$(sha256sum "$EMBED_DEST" | awk '{print $1}')
+          want=${digest#sha256:}
+          if [ -z "$want" ] || [ "$got" != "$want" ]; then
+            echo "xray asset checksum mismatch for $XRAY_ASSET: want $want got $got" >&2
+            exit 1
+          fi
           ls -l "$EMBED_DEST"
 
       - name: build
@@ -58,7 +67,7 @@ jobs:
         run: go build -trimpath -ldflags "-s -w" -o "${{ matrix.asset }}" ./cmd/cdnscan
 
       - name: upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}
           path: ${{ matrix.asset }}
@@ -70,7 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: download all build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: dist
           merge-multiple: true
@@ -80,7 +89,7 @@ jobs:
         run: sha256sum * > SHA256SUMS.txt
 
       - name: publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
             dist/rainscan-windows-amd64.exe

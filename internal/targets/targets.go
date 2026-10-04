@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -116,6 +117,11 @@ func (r *Registry) RestoreBuiltins() ([]string, error) {
 	// newly-published upstream CDN). Existing records are left as-is; ReloadAll
 	// refreshes their ranges.
 	for _, entry := range providers.Entries() {
+		if !providers.SafeRangeName(entry.Name) {
+			// A manifest-supplied name becomes a filename on persist; never
+			// ingest one that could traverse or carry an ADS suffix.
+			continue
+		}
 		lower := strings.ToLower(entry.Name)
 		r.builtinNames[lower] = true
 		if r.indexOf(entry.Name) >= 0 {
@@ -165,7 +171,7 @@ func (r *Registry) Get(name string) (Record, bool) {
 }
 
 // Upsert creates or replaces a target by name and persists it. CIDRs are
-// filtered to valid IPv4 entries first. The Builtin flag is decided by the
+// filtered to valid IPv4/IPv6 entries first. The Builtin flag is decided by the
 // registry, not the caller: a name that matches a compiled-in CDN is always
 // treated as that built-in (so editing cloudflare's ranges in the GUI updates
 // the built-in's cache file), and any other name is a custom. The persisted
@@ -175,7 +181,15 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	if rec.Name == "" {
 		return Record{}, fmt.Errorf("target name is required")
 	}
-	rec.CIDRs = iprange.FilterV4(rec.CIDRs)
+	rec.CIDRs = iprange.Filter(rec.CIDRs, iprange.FamilyAuto)
+	if api := strings.TrimSpace(rec.APIURL); api != "" {
+		// The API URL is fetched server-side on reload; only http(s) is
+		// accepted so neither file:// nor exotic schemes can ever reach
+		// url.Open-equivalent sinks downstream.
+		if u, err := url.Parse(api); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return Record{}, fmt.Errorf("api_url must be an http(s) URL")
+		}
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -265,8 +279,8 @@ func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts
 	if err != nil {
 		return Record{}, err
 	}
-	cidrs = iprange.FilterV4(cidrs)
-	sort.Strings(cidrs)
+	cidrs = iprange.Filter(cidrs, iprange.FamilyAuto)
+	iprange.Sort(cidrs)
 	rec.CIDRs = cidrs
 	return r.Upsert(rec)
 }

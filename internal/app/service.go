@@ -148,10 +148,17 @@ type ScanRequest struct {
 	SamplePer24     int
 	MaxHostsPerCIDR int
 	MaxTotal        int
-	Lite            bool
-	Refresh         bool
-	PreferBackup    bool
-	NoBackup        bool
+	// Family selects the address families to scan: "" / "auto" (dual-stack when
+	// this machine has global IPv6, IPv4-only when it doesn't), "ipv4", "ipv6",
+	// or "both". See iprange.ParseFamily for accepted spellings.
+	Family string
+	// MaxHostsPerV6CIDR caps how many addresses are drawn from one IPv6 prefix.
+	// 0 = iprange.DefaultV6HostsPerCIDR; there is no "enumerate it all" for IPv6.
+	MaxHostsPerV6CIDR int
+	Lite              bool
+	Refresh           bool
+	PreferBackup      bool
+	NoBackup          bool
 }
 
 // ScanHooks carry live log/progress callbacks (nil-safe).
@@ -190,10 +197,10 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 			XrayPath:     bin,
 			Outbound:     ob,
 			ProbeURL:     req.ProbeURL,
-			Probes:       orInt(req.Probes, 5),
-			Confirm:      orInt(req.Confirm, 3),
-			MaxLatency:   time.Duration(orInt(req.MaxLatencyMS, 800)) * time.Millisecond,
-			ProbeTimeout: time.Duration(req.ProbeTimeoutMS) * time.Millisecond,
+			Probes:       clampMax(orInt(req.Probes, 5), 64),
+			Confirm:      clampMax(orInt(req.Confirm, 3), 64),
+			MaxLatency:   time.Duration(clampMax(orInt(req.MaxLatencyMS, 800), 60000)) * time.Millisecond,
+			ProbeTimeout: time.Duration(clampMax(req.ProbeTimeoutMS, 120000)) * time.Millisecond,
 		})
 		if err != nil {
 			return pipeline.Config{}, err
@@ -205,9 +212,12 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 		ports = []int{port}
 	}
 
-	tcpConc := orInt(req.TCPConcurrency, pipeline.DefaultTCPConcurrency())
-	xrayConc := req.XrayConcurrency
-	batchSize := req.BatchSize
+	// Request-supplied concurrency and sampling ceilings are capped so a single
+	// scan request cannot exhaust host resources (goroutine/socket/process
+	// bombs). Zero stays zero — it means "auto" downstream.
+	tcpConc := clampMax(orInt(req.TCPConcurrency, pipeline.DefaultTCPConcurrency()), 4096)
+	xrayConc := clampMax(req.XrayConcurrency, 32)
+	batchSize := clampMax(req.BatchSize, 500)
 	if req.Lite {
 		tcpConc = pipeline.LiteTCPConcurrency
 		xrayConc = pipeline.LiteXrayConcurrency
@@ -222,9 +232,11 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 		PreferBackup: req.PreferBackup,
 		NoBackup:     req.NoBackup,
 		Sample: iprange.Strategy{
-			SamplePer24:     req.SamplePer24,
-			MaxHostsPerCIDR: req.MaxHostsPerCIDR,
-			MaxTotal:        req.MaxTotal,
+			SamplePer24:       req.SamplePer24,
+			MaxHostsPerCIDR:   req.MaxHostsPerCIDR,
+			MaxTotal:          req.MaxTotal,
+			Family:            iprange.ParseFamily(req.Family),
+			MaxHostsPerV6CIDR: clampMax(req.MaxHostsPerV6CIDR, 100000),
 		},
 		TCP:             scan.Options{Port: port, Concurrency: tcpConc, Timeout: time.Duration(orInt(req.TCPTimeoutMS, 3000)) * time.Millisecond},
 		Prober:          prober,
@@ -250,6 +262,15 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 func orInt(v, def int) int {
 	if v <= 0 {
 		return def
+	}
+	return v
+}
+
+// clampMax caps a request-supplied ceiling; zero and negatives pass through
+// untouched (downstream treats them as "auto" or applies its own default).
+func clampMax(v, max int) int {
+	if v > max {
+		return max
 	}
 	return v
 }

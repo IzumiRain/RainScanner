@@ -4,18 +4,24 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
-	"strconv"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"cdnscan/internal/app"
+	"cdnscan/internal/iprange"
 	"cdnscan/internal/link"
 	"cdnscan/internal/output"
 	"cdnscan/internal/pipeline"
@@ -30,9 +36,8 @@ var assets embed.FS
 type Server struct {
 	svc *app.Service
 
-	mu     sync.Mutex
-	jobs   map[string]*job
-	nextID int
+	mu   sync.Mutex
+	jobs map[string]*job
 
 	scanning atomic.Bool
 	cancel   context.CancelFunc
@@ -74,7 +79,88 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/stream", s.handleStream)
-	return http.Serve(ln, mux)
+
+	// DNS-rebinding guard: when bound to a specific address, only accept
+	// requests whose Host header names that address (plus localhost for
+	// loopback binds). On a wildcard bind any Host is legitimate — a rebinding
+	// name resolves to this host anyway — so the check is skipped there.
+	var handler http.Handler = mux
+	if allowed := allowedHosts(ln.Addr()); allowed != nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := r.Host
+			if hp, _, err := net.SplitHostPort(r.Host); err == nil {
+				h = hp
+			}
+			h = strings.ToLower(strings.Trim(h, "[]"))
+			if !allowed[h] {
+				http.Error(w, "host header rejected", http.StatusForbidden)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
+
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: SSE streams stay open for the length of a scan.
+	}
+	return srv.Serve(ln)
+}
+
+// allowedHosts returns the Host-header values accepted for a specific (non-
+// wildcard) listen address, or nil when the bind is wildcard and every host is
+// acceptable.
+func allowedHosts(a net.Addr) map[string]bool {
+	host, _, err := net.SplitHostPort(a.String())
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		return nil
+	}
+	m := map[string]bool{strings.ToLower(strings.Trim(host, "[]")): true}
+	if host == "127.0.0.1" || host == "::1" {
+		m["localhost"] = true
+		m["127.0.0.1"] = true
+		m["::1"] = true
+	}
+	return m
+}
+
+// guardMutation rejects cross-site "simple requests" against state-changing
+// endpoints. Browsers attach an Origin header to every POST; a mismatching
+// Origin means the call did not come from this GUI, and a non-JSON content type
+// is exactly what a cross-origin page can send without a preflight. Non-browser
+// clients (curl) send neither header and pass, as does the embedded GUI, whose
+// same-origin requests carry a matching Origin.
+func guardMutation(w http.ResponseWriter, r *http.Request) bool {
+	if o := r.Header.Get("Origin"); o != "" && o != "http://"+r.Host && o != "https://"+r.Host {
+		http.Error(w, "cross-origin request rejected", http.StatusForbidden)
+		return false
+	}
+	if ct := r.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return false
+		}
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return true
+}
+
+// checkLocalXrayPath keeps request-supplied xray paths local. A UNC (or
+// scheme-like) path would make this process authenticate to — or execute a
+// binary from — a remote host; a path with separators must already exist as a
+// local regular file. Bare names are left for exec.LookPath (PATH resolution).
+func checkLocalXrayPath(p string) error {
+	if strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") {
+		return fmt.Errorf("xray_path must be a local path (remote/UNC paths are rejected)")
+	}
+	if strings.ContainsAny(p, `/\`) {
+		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
+			return fmt.Errorf("xray_path %q does not exist as a local file", p)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +201,11 @@ func (s *Server) handleRanges(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown target", http.StatusNotFound)
 		return
 	}
-	writeJSON(w, map[string]any{"name": rec.Name, "count": len(rec.CIDRs), "cidrs": rec.CIDRs})
+	v4, v6 := iprange.Split(rec.CIDRs)
+	writeJSON(w, map[string]any{
+		"name": rec.Name, "count": len(rec.CIDRs), "cidrs": rec.CIDRs,
+		"count_v4": v4, "count_v6": v6,
+	})
 }
 
 // handleTargets is the CRUD endpoint for the persistent target store:
@@ -129,6 +219,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, s.svc.Targets())
 
 	case http.MethodPost:
+		if !guardMutation(w, r) {
+			return
+		}
 		var rec targets.Record
 		if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
 			http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
@@ -142,6 +235,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, saved)
 
 	case http.MethodDelete:
+		if !guardMutation(w, r) {
+			return
+		}
 		name := r.URL.Query().Get("name")
 		if name == "" {
 			http.Error(w, "missing name", http.StatusBadRequest)
@@ -164,6 +260,9 @@ func (s *Server) handleTargets(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !guardMutation(w, r) {
 		return
 	}
 	var req struct {
@@ -190,6 +289,9 @@ func (s *Server) handleTargetReload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleTargetReloadAll(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !guardMutation(w, r) {
 		return
 	}
 	var req struct {
@@ -228,27 +330,29 @@ type customReq struct {
 }
 
 type scanReq struct {
-	CDN             string     `json:"cdn"`
-	Custom          *customReq `json:"custom"`
-	Ports           []int      `json:"ports"`
-	Link            string     `json:"link"`
-	XrayPath        string     `json:"xray_path"`
-	Port            int        `json:"port"`
-	TCPConcurrency  int        `json:"tcp_concurrency"`
-	XrayConcurrency int        `json:"xray_concurrency"` // max concurrent xray processes
-	BatchSize       int        `json:"batch_size"`       // candidates per xray process (0 = default)
-	Probes          int        `json:"probes"`
-	Confirm         int        `json:"confirm"`
-	MaxLatencyMS    int        `json:"max_latency_ms"`
-	ProbeTimeoutMS  int        `json:"probe_timeout_ms"` // 0 = auto (derive from max latency)
-	ProbeURL        string     `json:"probe_url"`
-	SamplePer24     int        `json:"sample_per_24"`
-	MaxHostsPerCIDR int        `json:"max_hosts_per_cidr"`
-	MaxTotal        int        `json:"max_total"` // random-sample cap across the whole pool (0 = all)
-	Lite            bool       `json:"lite"`          // low-power mode: hard-cap concurrency
-	Refresh         bool       `json:"refresh"`
-	PreferBackup    bool       `json:"prefer_backup"` // try backup source before official API
-	NoBackup        bool       `json:"no_backup"`     // skip backup sources entirely
+	CDN               string     `json:"cdn"`
+	Custom            *customReq `json:"custom"`
+	Ports             []int      `json:"ports"`
+	Link              string     `json:"link"`
+	XrayPath          string     `json:"xray_path"`
+	Port              int        `json:"port"`
+	TCPConcurrency    int        `json:"tcp_concurrency"`
+	XrayConcurrency   int        `json:"xray_concurrency"` // max concurrent xray processes
+	BatchSize         int        `json:"batch_size"`       // candidates per xray process (0 = default)
+	Probes            int        `json:"probes"`
+	Confirm           int        `json:"confirm"`
+	MaxLatencyMS      int        `json:"max_latency_ms"`
+	ProbeTimeoutMS    int        `json:"probe_timeout_ms"` // 0 = auto (derive from max latency)
+	ProbeURL          string     `json:"probe_url"`
+	SamplePer24       int        `json:"sample_per_24"`
+	MaxHostsPerCIDR   int        `json:"max_hosts_per_cidr"`
+	MaxTotal          int        `json:"max_total"`             // random-sample cap across the whole pool (0 = all)
+	Family            string     `json:"family"`                // ""|auto|ipv4|ipv6|both
+	MaxHostsPerV6CIDR int        `json:"max_hosts_per_v6_cidr"` // addresses drawn per IPv6 prefix (0 = default)
+	Lite              bool       `json:"lite"`                  // low-power mode: hard-cap concurrency
+	Refresh           bool       `json:"refresh"`
+	PreferBackup      bool       `json:"prefer_backup"` // try backup source before official API
+	NoBackup          bool       `json:"no_backup"`     // skip backup sources entirely
 }
 
 // scanResult is the consolidated payload sent in the SSE "result" event for the
@@ -256,7 +360,11 @@ type scanReq struct {
 type scanResult struct {
 	CDN          string              `json:"cdn"`
 	Ranges       int                 `json:"ranges"`
+	RangesV4     int                 `json:"ranges_v4"`
+	RangesV6     int                 `json:"ranges_v6"`
 	Hosts        int                 `json:"hosts"`
+	HostsV4      int                 `json:"hosts_v4"`
+	HostsV6      int                 `json:"hosts_v6"`
 	TCPOpen      int                 `json:"tcp_open"`
 	Confirmed    int                 `json:"confirmed"`
 	TCPIPs       []string            `json:"tcp_ips"`       // unique TCP-reachable IPs (copy-only-IPs)
@@ -273,7 +381,8 @@ func toScanRequest(req scanReq) app.ScanRequest {
 		TCPConcurrency: req.TCPConcurrency, XrayConcurrency: req.XrayConcurrency, BatchSize: req.BatchSize,
 		Probes: req.Probes, Confirm: req.Confirm, MaxLatencyMS: req.MaxLatencyMS, ProbeTimeoutMS: req.ProbeTimeoutMS,
 		ProbeURL: req.ProbeURL, SamplePer24: req.SamplePer24, MaxHostsPerCIDR: req.MaxHostsPerCIDR,
-		MaxTotal: req.MaxTotal, Lite: req.Lite, Refresh: req.Refresh,
+		MaxTotal: req.MaxTotal, Family: req.Family, MaxHostsPerV6CIDR: req.MaxHostsPerV6CIDR,
+		Lite: req.Lite, Refresh: req.Refresh,
 		PreferBackup: req.PreferBackup, NoBackup: req.NoBackup,
 	}
 	if req.Custom != nil {
@@ -287,10 +396,29 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if !guardMutation(w, r) {
+		return
+	}
 	var req scanReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if len(req.Ports) > 64 {
+		http.Error(w, "too many ports (max 64)", http.StatusBadRequest)
+		return
+	}
+	for _, p := range req.Ports {
+		if p < 1 || p > 65535 {
+			http.Error(w, fmt.Sprintf("invalid port %d", p), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.XrayPath != "" {
+		if err := checkLocalXrayPath(req.XrayPath); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	if req.Custom == nil && req.CDN == "" {
 		http.Error(w, "select a CDN or add a custom range", http.StatusBadRequest)
@@ -347,6 +475,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if !guardMutation(w, r) {
+		return
+	}
 	s.mu.Lock()
 	cancel := s.cancel
 	s.mu.Unlock()
@@ -366,7 +497,8 @@ func buildResult(summaries []pipeline.Summary, rawLink string) scanResult {
 	}
 	s := summaries[0]
 	res = scanResult{
-		CDN: s.CDN, Ranges: s.Ranges, Hosts: s.Hosts,
+		CDN: s.CDN, Ranges: s.Ranges, RangesV4: s.RangesV4, RangesV6: s.RangesV6,
+		Hosts: s.Hosts, HostsV4: s.HostsV4, HostsV6: s.HostsV6,
 		TCPOpen: s.TCPOpen, Confirmed: s.Confirmed,
 		Endpoints: s.Endpoints, Entries: s.Entries,
 	}
@@ -436,20 +568,46 @@ type event struct {
 }
 
 type job struct {
-	id     string
-	mu     sync.Mutex
-	events []event
-	done   bool
-	ch     chan struct{} // replaced on each push to broadcast
+	id        string
+	createdAt time.Time
+	mu        sync.Mutex
+	events    []event
+	done      bool
+	ch        chan struct{} // replaced on each push to broadcast
 }
 
 func (s *Server) newJob() *job {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.nextID++
-	j := &job{id: strconv.Itoa(s.nextID), ch: make(chan struct{})}
+	var b [16]byte
+	id := ""
+	if _, err := rand.Read(b[:]); err == nil {
+		id = hex.EncodeToString(b[:])
+	} else {
+		// crypto/rand failing means something is deeply wrong; fall back to a
+		// timestamp id rather than refusing to scan at all.
+		id = fmt.Sprintf("t%d", time.Now().UnixNano())
+	}
+	j := &job{id: id, createdAt: time.Now(), ch: make(chan struct{})}
 	s.jobs[j.id] = j
+	s.sweepJobsLocked()
 	return j
+}
+
+// sweepJobsLocked bounds job retention. A finished job's event buffer can
+// contain credential-bearing generated configs, so finished jobs are kept for
+// one hour after completion (enough for a closed tab to be reopened) and then
+// dropped; the running job is never touched.
+func (s *Server) sweepJobsLocked() {
+	cutoff := time.Now().Add(-time.Hour)
+	for id, j := range s.jobs {
+		j.mu.Lock()
+		reap := j.done && j.createdAt.Before(cutoff)
+		j.mu.Unlock()
+		if reap {
+			delete(s.jobs, id)
+		}
+	}
 }
 
 func (j *job) push(e event) {
