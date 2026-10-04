@@ -1,0 +1,11 @@
+# Runtime artifacts: running the scanner from the working tree writes its
+# range cache and scan results beside the source.
+ips/
+results/
+dist/
+
+# Local release-style builds: scripts/fetch-xray.sh swaps the tracked
+# placeholder archives for ~20 MB real ones. Keep them out of commits with
+#   git update-index --skip-worktree internal/xray/assets/*.zip
+# (the tracked placeholders must stay in the repo for plain `go build`).
+*.exe
