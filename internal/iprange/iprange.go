@@ -124,6 +124,30 @@ func Expand(cidrs []string, s Strategy) ([]netip.Addr, error) {
 		out  []netip.Addr
 		n    int // unique candidates considered so far (reservoir counter)
 	)
+
+	// Guard the unbounded default: "no caps at all" fully enumerates the pool,
+	// which is fine for real CDN allocations (~1.5M hosts) but fatal for a
+	// hand-typed 0.0.0.0/0 (hundreds of GB of address book). Full enumeration of
+	// an oversized pool silently downgrades to a bounded reservoir sample
+	// instead of OOM-killing the process; any explicit cap is honored as-is.
+	const maxAutoPool = 1 << 22
+	if s.MaxTotal <= 0 && s.MaxHostsPerCIDR <= 0 && s.SamplePer24 <= 0 {
+		var total uint64
+		for _, c := range cidrs {
+			if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil && p.Addr().Is4() {
+				if b := 32 - p.Bits(); b < 63 {
+					total += uint64(1) << uint(b)
+				} else {
+					total = ^uint64(0)
+					break
+				}
+			}
+		}
+		if total > maxAutoPool {
+			s.MaxTotal = maxAutoPool
+		}
+	}
+
 	if s.MaxTotal <= 0 {
 		seen = make(map[netip.Addr]struct{})
 	}

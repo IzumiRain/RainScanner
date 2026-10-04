@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -116,6 +117,11 @@ func (r *Registry) RestoreBuiltins() ([]string, error) {
 	// newly-published upstream CDN). Existing records are left as-is; ReloadAll
 	// refreshes their ranges.
 	for _, entry := range providers.Entries() {
+		if !providers.SafeRangeName(entry.Name) {
+			// A manifest-supplied name becomes a filename on persist; never
+			// ingest one that could traverse or carry an ADS suffix.
+			continue
+		}
 		lower := strings.ToLower(entry.Name)
 		r.builtinNames[lower] = true
 		if r.indexOf(entry.Name) >= 0 {
@@ -176,6 +182,14 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 		return Record{}, fmt.Errorf("target name is required")
 	}
 	rec.CIDRs = iprange.Filter(rec.CIDRs, iprange.FamilyAuto)
+	if api := strings.TrimSpace(rec.APIURL); api != "" {
+		// The API URL is fetched server-side on reload; only http(s) is
+		// accepted so neither file:// nor exotic schemes can ever reach
+		// url.Open-equivalent sinks downstream.
+		if u, err := url.Parse(api); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+			return Record{}, fmt.Errorf("api_url must be an http(s) URL")
+		}
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

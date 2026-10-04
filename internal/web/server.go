@@ -79,13 +79,51 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/scan", s.handleScan)
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/stream", s.handleStream)
+
+	// DNS-rebinding guard: when bound to a specific address, only accept
+	// requests whose Host header names that address (plus localhost for
+	// loopback binds). On a wildcard bind any Host is legitimate — a rebinding
+	// name resolves to this host anyway — so the check is skipped there.
+	var handler http.Handler = mux
+	if allowed := allowedHosts(ln.Addr()); allowed != nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			h := r.Host
+			if hp, _, err := net.SplitHostPort(r.Host); err == nil {
+				h = hp
+			}
+			h = strings.ToLower(strings.Trim(h, "[]"))
+			if !allowed[h] {
+				http.Error(w, "host header rejected", http.StatusForbidden)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
+	}
+
 	srv := &http.Server{
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 		// No WriteTimeout: SSE streams stay open for the length of a scan.
 	}
 	return srv.Serve(ln)
+}
+
+// allowedHosts returns the Host-header values accepted for a specific (non-
+// wildcard) listen address, or nil when the bind is wildcard and every host is
+// acceptable.
+func allowedHosts(a net.Addr) map[string]bool {
+	host, _, err := net.SplitHostPort(a.String())
+	if err != nil || host == "" || host == "0.0.0.0" || host == "::" {
+		return nil
+	}
+	m := map[string]bool{strings.ToLower(strings.Trim(host, "[]")): true}
+	if host == "127.0.0.1" || host == "::1" {
+		m["localhost"] = true
+		m["127.0.0.1"] = true
+		m["::1"] = true
+	}
+	return m
 }
 
 // guardMutation rejects cross-site "simple requests" against state-changing

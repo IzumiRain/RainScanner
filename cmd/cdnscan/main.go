@@ -106,6 +106,12 @@ func main() {
 		// enableConsoleColors flips Windows CMD into ANSI mode (no-op elsewhere);
 		// the red/green/blue helpers degrade to plain text if that fails.
 		enableConsoleColors()
+		if h, _, herr := net.SplitHostPort(*addr); herr == nil {
+			ip := net.ParseIP(h)
+			if h != "localhost" && h != "" && (ip == nil || !ip.IsLoopback()) {
+				log.Printf("WARNING: the web API is listening on %s (non-loopback) with NO authentication — anyone on this network can start scans, edit targets and read results. Bind to 127.0.0.1 unless you accept this.", *addr)
+			}
+		}
 		fmt.Printf("\n  %s\n  %s %s\n  %s\n\n",
 			white("RainScanner is running."),
 			green("Opening your browser at"), blue(url),

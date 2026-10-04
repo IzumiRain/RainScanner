@@ -529,8 +529,24 @@ func Load(ipsDir, name string) (*RangeFile, error) {
 	return &rf, nil
 }
 
-// Save writes ips/<cdn>.json (pretty-printed, deterministic).
+// safeRangeNameRe bounds the CDN names that may become filenames: a
+// manifest-supplied name is persisted as filepath.Join(ipsDir, name+".json"),
+// so traversal separators, colons (NTFS alternate data streams), leading dots
+// and control characters must never reach that path.
+var safeRangeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
+
+// SafeRangeName reports whether a CDN name is safe to persist as
+// ipsDir/<name>.json unsanitized.
+func SafeRangeName(name string) bool {
+	return safeRangeNameRe.MatchString(strings.TrimSpace(name))
+}
+
+// Save writes ips/<cdn>.json (pretty-printed, deterministic). The name is
+// validated, not sanitized — a hostile name is an error, never a rewrite.
 func Save(ipsDir string, rf *RangeFile) error {
+	if !SafeRangeName(rf.CDN) {
+		return fmt.Errorf("refusing to save range file with unsafe CDN name %q", rf.CDN)
+	}
 	if err := os.MkdirAll(ipsDir, 0o755); err != nil {
 		return err
 	}
