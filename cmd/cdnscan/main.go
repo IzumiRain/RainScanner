@@ -5,8 +5,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -195,6 +197,7 @@ func main() {
 	hooks := app.ScanHooks{Log: sb.logf, Progress: sb.progress}
 
 	var summaries []pipeline.Summary
+	var scanErrors []error
 	for _, cdn := range cdns {
 		sums, err := svc.Scan(ctx, app.ScanRequest{
 			CDN:             cdn,
@@ -223,20 +226,34 @@ func main() {
 			PreferBackup: *preferBackup,
 			NoBackup:     *noBackup,
 		}, hooks)
-		if err != nil {
-			sb.finish()
-			log.Fatalf("[%s] %v", cdn, err)
-		}
 		summaries = append(summaries, sums...)
+		if err != nil {
+			scanErrors = append(scanErrors, fmt.Errorf("%s: %w", cdn, err))
+		}
+		if ctx.Err() != nil {
+			break
+		}
 	}
 	sb.finish()
 
 	fmt.Printf("\nTotal time: %.1fs\n", sb.elapsed().Seconds())
-	fmt.Println("=== Summary ===")
+	printSummaries(os.Stdout, summaries, *linkStr == "")
+	if err := errors.Join(scanErrors...); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func printSummaries(w io.Writer, summaries []pipeline.Summary, tcpOnly bool) {
+	fmt.Fprintln(w, "=== Summary ===")
 	for _, s := range summaries {
-		fmt.Printf("%-12s ranges=%d (v4=%d v6=%d) hosts=%d (v4=%d v6=%d) tcp_open=%d confirmed=%d -> %s\n",
+		fmt.Fprintf(w, "%-12s ranges=%d (v4=%d v6=%d) hosts=%d (v4=%d v6=%d) tcp_open=%d confirmed=%d -> %s\n",
 			s.CDN, s.Ranges, s.RangesV4, s.RangesV6, s.Hosts, s.HostsV4, s.HostsV6,
 			s.TCPOpen, s.Confirmed, s.OutPath)
+		if tcpOnly {
+			for _, ep := range s.Endpoints {
+				fmt.Fprintln(w, net.JoinHostPort(ep.IP, strconv.Itoa(ep.Port)))
+			}
+		}
 	}
 }
 

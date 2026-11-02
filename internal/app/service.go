@@ -64,7 +64,7 @@ func (s *Service) Ranges(name string) (targets.Record, bool) { return s.reg.Get(
 // Upsert creates or updates a target (built-in range edit or a custom).
 func (s *Service) Upsert(rec targets.Record) (targets.Record, error) { return s.reg.Upsert(rec) }
 
-// Delete removes a custom target (built-ins are non-deletable: removed=false).
+// Delete removes a custom target or hides a built-in until defaults are restored.
 func (s *Service) Delete(name string) (bool, error) { return s.reg.Delete(name) }
 
 // Reload re-fetches a single target's ranges from its feed and persists them.
@@ -169,11 +169,27 @@ type ScanHooks struct {
 
 // Scan builds the pipeline config from req and runs it. Target resolution: an
 // explicit Custom wins; otherwise the named CDN is resolved from the registry so
-// GUI edits to its ranges take effect (unless Refresh forces a re-fetch).
+// GUI edits take effect. Refresh fetches through the registry before scanning,
+// preserving feed overrides and updating the ranges used by subsequent scans.
 func (s *Service) Scan(ctx context.Context, req ScanRequest, hooks ScanHooks) ([]pipeline.Summary, error) {
 	cfg, err := s.buildConfig(req)
 	if err != nil {
 		return nil, err
+	}
+	if req.Custom == nil {
+		if rec, ok := s.reg.Get(req.CDN); ok {
+			if req.Refresh || len(rec.CIDRs) == 0 && (rec.Builtin || rec.APIURL != "") {
+				rec, err = s.reg.Reload(ctx, cfg.HTTPClient, rec.Name, providers.FetchOptions{PreferBackup: req.PreferBackup, NoBackup: req.NoBackup})
+				if err != nil {
+					return nil, err
+				}
+			}
+			cfg.Custom = &pipeline.CustomTarget{Name: rec.Name, CIDRs: append([]string{}, rec.CIDRs...)}
+			cfg.CDNs = nil
+			cfg.ForceRefresh = false
+		} else {
+			return nil, fmt.Errorf("unknown target %q", req.CDN)
+		}
 	}
 	cfg.Log = hooks.Log
 	cfg.Progress = hooks.Progress
@@ -248,7 +264,7 @@ func (s *Service) buildConfig(req ScanRequest) (pipeline.Config, error) {
 
 	switch {
 	case req.Custom != nil:
-		cfg.Custom = &pipeline.CustomTarget{Name: req.Custom.Name, CIDRs: req.Custom.CIDRs}
+		cfg.Custom = &pipeline.CustomTarget{Name: req.Custom.Name, CIDRs: append([]string{}, req.Custom.CIDRs...)}
 	default:
 		if rec, ok := s.reg.Get(req.CDN); ok && len(rec.CIDRs) > 0 && !req.Refresh {
 			cfg.Custom = &pipeline.CustomTarget{Name: rec.Name, CIDRs: rec.CIDRs}

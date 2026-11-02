@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"cdnscan/internal/output"
@@ -62,6 +63,7 @@ type FileStore struct {
 	ipsDir     string
 	resultsDir string
 	customPath string
+	mu         sync.Mutex // serialize custom/hidden envelope read-modify-write
 }
 
 // NewFileStore builds a FileStore over the given ips/ and results/ directories.
@@ -107,15 +109,35 @@ func (f *FileStore) saveEnvelope(cf customFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(f.customPath, b, 0o644)
+	tmp, err := os.CreateTemp(f.ipsDir, ".custom-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), f.customPath)
 }
 
 func (f *FileStore) LoadCustoms() ([]CustomTarget, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cf, err := f.loadEnvelope()
 	return cf.Targets, err
 }
 
 func (f *FileStore) SaveCustoms(customs []CustomTarget) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cf, err := f.loadEnvelope()
 	if err != nil {
 		return err
@@ -125,11 +147,15 @@ func (f *FileStore) SaveCustoms(customs []CustomTarget) error {
 }
 
 func (f *FileStore) LoadHidden() ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cf, err := f.loadEnvelope()
 	return cf.Hidden, err
 }
 
 func (f *FileStore) SaveHidden(hidden []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cf, err := f.loadEnvelope()
 	if err != nil {
 		return err

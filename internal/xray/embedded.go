@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // HasEmbedded reports whether this build carries a usable embedded xray-core
@@ -53,12 +54,17 @@ func embeddedEntryName() (string, error) {
 // ExtractEmbedded writes the embedded xray binary into the user cache dir and
 // returns its path. The filename is keyed by a hash of the embedded bytes, so a
 // rebuilt binary carrying a newer xray extracts to a fresh file and an existing,
-// correctly-sized extraction is reused without rewriting.
+// content-verified extraction is reused without rewriting.
 func ExtractEmbedded() (string, error) {
-	if _, err := embeddedEntryName(); err != nil {
+	dir, err := cacheDir()
+	if err != nil {
 		return "", err
 	}
-	zr, err := zip.NewReader(bytes.NewReader(embeddedXrayZip), int64(len(embeddedXrayZip)))
+	return extractEmbedded(embeddedXrayZip, embeddedXrayName, dir)
+}
+
+func extractEmbedded(archive []byte, name, dir string) (string, error) {
+	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
 	if err != nil {
 		return "", err
 	}
@@ -74,29 +80,59 @@ func ExtractEmbedded() (string, error) {
 		return "", fmt.Errorf("embedded archive contains no xray binary")
 	}
 
-	sum := sha256.Sum256(embeddedXrayZip)
+	sum := sha256.Sum256(archive)
 	tag := hex.EncodeToString(sum[:])[:8]
-	ext := filepath.Ext(embeddedXrayName)
-	dir, err := cacheDir()
+	ext := filepath.Ext(name)
+	dst := filepath.Join(dir, fmt.Sprintf("xray-%s%s", tag, ext))
+	rc, err := entry.Open()
 	if err != nil {
 		return "", err
 	}
-	dst := filepath.Join(dir, fmt.Sprintf("xray-%s%s", tag, ext))
-
-	// Reuse an existing, correctly-sized extraction.
-	if fi, err := os.Stat(dst); err == nil && uint64(fi.Size()) == entry.UncompressedSize64 {
+	hash := sha256.New()
+	_, hashErr := io.Copy(hash, rc)
+	closeErr := rc.Close()
+	if hashErr != nil {
+		return "", hashErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	want := hash.Sum(nil)
+	valid := func() bool {
+		fi, err := os.Lstat(dst)
+		if err != nil || !fi.Mode().IsRegular() || uint64(fi.Size()) != entry.UncompressedSize64 {
+			return false
+		}
+		if runtime.GOOS != "windows" && (fi.Mode().Perm()&0o111 != 0o111 || fi.Mode().Perm()&0o022 != 0) {
+			return false
+		}
+		f, err := os.Open(dst)
+		if err != nil {
+			return false
+		}
+		defer f.Close()
+		hash := sha256.New()
+		_, err = io.Copy(hash, f)
+		return err == nil && bytes.Equal(hash.Sum(nil), want)
+	}
+	if valid() {
 		return dst, nil
 	}
 
-	rc, err := entry.Open()
+	rc, err = entry.Open()
 	if err != nil {
 		return "", err
 	}
 	defer rc.Close()
 
-	tmp := dst + ".new"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
+	out, err := os.CreateTemp(dir, ".xray-*")
 	if err != nil {
+		return "", err
+	}
+	tmp := out.Name()
+	defer os.Remove(tmp)
+	if err := out.Chmod(0o755); err != nil {
+		out.Close()
 		return "", err
 	}
 	if _, err := io.Copy(out, rc); err != nil {
@@ -108,8 +144,14 @@ func ExtractEmbedded() (string, error) {
 		os.Remove(tmp)
 		return "", err
 	}
+	if valid() {
+		return dst, nil
+	}
 	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
+		// Windows may refuse replacement when a competing extractor published first.
+		if valid() {
+			return dst, nil
+		}
 		return "", err
 	}
 	return dst, nil

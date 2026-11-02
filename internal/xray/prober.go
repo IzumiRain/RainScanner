@@ -9,6 +9,8 @@ package xray
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"net/url"
 	"os/exec"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +28,7 @@ import (
 // ProberOptions configures Stage 2 behaviour and the accuracy controls used to
 // drive the false-positive / false-negative rate toward near-zero.
 type ProberOptions struct {
-	XrayPath     string        // path to xray-core binary
+	XrayPath     string // path to xray-core binary
 	Outbound     *link.Outbound
 	ProbeURL     string        // real request target, e.g. https://www.gstatic.com/generate_204
 	Probes       int           // measured probes per candidate (after warmup)
@@ -46,7 +49,14 @@ type TestResult struct {
 	Median    time.Duration
 	Successes int
 	Total     int
-	Err       string
+	Err       string // infrastructure (see IsInfrastructureError), cancellation, or empty for candidate rejection
+}
+
+const infrastructurePrefix = "xray infrastructure: "
+
+// IsInfrastructureError distinguishes local probe failures from rejected candidates.
+func IsInfrastructureError(err string) bool {
+	return strings.HasPrefix(err, infrastructurePrefix)
 }
 
 // BatchItem is one candidate to probe in a batch.
@@ -80,6 +90,10 @@ func NewProber(opt ProberOptions) (*Prober, error) {
 	}
 	if opt.ProbeURL == "" {
 		opt.ProbeURL = "https://www.gstatic.com/generate_204"
+	}
+	probeURL, err := url.Parse(opt.ProbeURL)
+	if err != nil || probeURL.Host == "" || (probeURL.Scheme != "http" && probeURL.Scheme != "https") {
+		return nil, fmt.Errorf("probe URL must be an absolute HTTP(S) URL")
 	}
 	if opt.MaxLatency <= 0 {
 		opt.MaxLatency = time.Second
@@ -117,20 +131,30 @@ func (p *Prober) TestBatch(ctx context.Context, items []BatchItem) []TestResult 
 
 	setErr := func(msg string) []TestResult {
 		for i := range res {
-			res[i].Err = msg
+			res[i].OK = false
+			res[i].Err = infrastructurePrefix + msg
+			if ctx.Err() != nil {
+				res[i].Err = "cancelled"
+			}
 		}
 		return res
 	}
 
-	ports, err := freePorts(len(items))
+	ports, release, err := leasePorts(len(items))
 	if err != nil {
 		return setErr("alloc ports: " + err.Error())
 	}
+	defer release()
+	var secret [32]byte
+	if _, err := rand.Read(secret[:]); err != nil {
+		return setErr("proxy credentials: " + err.Error())
+	}
+	username, password := hex.EncodeToString(secret[:16]), hex.EncodeToString(secret[16:])
 	targets := make([]BatchTarget, len(items))
 	for i, it := range items {
 		targets[i] = BatchTarget{IP: it.Addr.String(), Port: it.Port, InboundPort: ports[i]}
 	}
-	cfg, err := GenerateBatchConfig(p.opt.Outbound, targets)
+	cfg, err := generateBatchConfig(p.opt.Outbound, targets, username, password)
 	if err != nil {
 		return setErr("gen config: " + err.Error())
 	}
@@ -145,19 +169,43 @@ func (p *Prober) TestBatch(ctx context.Context, items []BatchItem) []TestResult 
 	if err := cmd.Start(); err != nil {
 		return setErr("start xray: " + err.Error())
 	}
+	// Only this goroutine calls Wait. Closing exited publishes exitErr safely and
+	// cancellation interrupts startup and in-flight HTTP requests immediately.
+	exited := make(chan struct{})
+	var exitErr error
+	go func() {
+		exitErr = cmd.Wait()
+		close(exited)
+		cancel()
+	}()
 	defer func() {
 		cancel()
-		_ = cmd.Wait()
+		<-exited
 	}()
-
-	// Wait for the inbounds to come up. They bind in order at startup, so once
-	// the LAST port is listening the whole batch is ready; then a short grace.
-	if !waitPort(runCtx, ports[len(ports)-1], p.opt.Startup) {
-		return setErr("xray inbounds did not start")
+	processError := func() string {
+		if ctx.Err() != nil {
+			return "cancelled"
+		}
+		select {
+		case <-exited:
+			return fmt.Sprintf("process exited: %v", exitErr)
+		default:
+			return ""
+		}
 	}
-	select {
-	case <-time.After(200 * time.Millisecond):
-	case <-runCtx.Done():
+
+	startupCtx, startupCancel := context.WithTimeout(runCtx, p.opt.Startup)
+	defer startupCancel()
+	for _, port := range ports {
+		if !waitPort(startupCtx, port, p.opt.Startup) {
+			if msg := processError(); msg != "" {
+				return setErr(msg)
+			}
+			return setErr("xray inbounds did not start")
+		}
+		if err := p.checkInbound(startupCtx, port); err != nil {
+			return setErr(err.Error())
+		}
 	}
 
 	// Probe candidates concurrently, but cap simultaneous probes: a 50-wide burst
@@ -172,22 +220,57 @@ func (p *Prober) TestBatch(ctx context.Context, items []BatchItem) []TestResult 
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
-			case <-ctx.Done():
+			case <-runCtx.Done():
 				return
 			}
-			res[i] = p.probeEndpoint(runCtx, ctx, ports[i], items[i].Addr)
+			res[i] = p.probeEndpoint(runCtx, ctx, ports[i], items[i].Addr, username, password)
 		}(i)
 	}
 	wg.Wait()
+	// Socket failure can be visible before Wait publishes process exit. Verify
+	// the local listeners independently before treating failures as candidates;
+	// authentication challenges do not require a working remote outbound.
+	for _, port := range ports {
+		if err := p.checkInbound(runCtx, port); err != nil {
+			if msg := processError(); msg != "" {
+				return setErr(msg)
+			}
+			return setErr(err.Error())
+		}
+	}
+	if msg := processError(); msg != "" {
+		return setErr(msg)
+	}
 	return res
+}
+
+func (p *Prober) checkInbound(ctx context.Context, port int) error {
+	// A successful TCP connection alone proves nothing about listener ownership.
+	// Require an authentication challenge before sending batch-only credentials.
+	client := p.proxyClient(port, "", "")
+	defer client.CloseIdleConnections()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://rainscanner.invalid/", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("inbound authentication check: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusProxyAuthRequired {
+		return fmt.Errorf("inbound did not require proxy authentication")
+	}
+	return nil
 }
 
 // probeEndpoint runs the warmup + fail-fast K-of-N latency measurement for one
 // candidate against an already-running inbound on the given local port. runCtx
 // bounds the xray process lifetime; parentCtx signals overall cancellation.
-func (p *Prober) probeEndpoint(runCtx, parentCtx context.Context, inboundPort int, addr netip.Addr) TestResult {
+func (p *Prober) probeEndpoint(runCtx, parentCtx context.Context, inboundPort int, addr netip.Addr, username, password string) TestResult {
 	res := TestResult{Addr: addr, Total: p.opt.Probes}
-	client := p.proxyClient(inboundPort)
+	client := p.proxyClient(inboundPort, username, password)
+	defer client.CloseIdleConnections()
 
 	// Warmup request (establishes the proxied tunnel); result discarded so the
 	// connection-setup cost does not skew the measured median. Capped to a short
@@ -196,7 +279,10 @@ func (p *Prober) probeEndpoint(runCtx, parentCtx context.Context, inboundPort in
 	if warmTO > 2*time.Second {
 		warmTO = 2 * time.Second
 	}
-	_, _ = p.probeOnce(runCtx, client, warmTO)
+	if _, _, err := p.probeOnce(runCtx, client, warmTO); err != nil {
+		res.Err = infrastructurePrefix + err.Error()
+		return res
+	}
 
 	// Fail-fast K-of-N: stop as soon as the outcome is decided.
 	//   - accept path: break once we have Confirm successes
@@ -215,7 +301,12 @@ func (p *Prober) probeEndpoint(runCtx, parentCtx context.Context, inboundPort in
 		default:
 		}
 		attempts++
-		if d, ok := p.probeOnce(runCtx, client, p.opt.ProbeTimeout); ok {
+		d, ok, err := p.probeOnce(runCtx, client, p.opt.ProbeTimeout)
+		if err != nil {
+			res.Err = infrastructurePrefix + err.Error()
+			return res
+		}
+		if ok {
 			lats = append(lats, d)
 			if len(lats) >= p.opt.Confirm {
 				break
@@ -237,8 +328,11 @@ func (p *Prober) probeEndpoint(runCtx, parentCtx context.Context, inboundPort in
 	return res
 }
 
-func (p *Prober) proxyClient(inboundPort int) *http.Client {
+func (p *Prober) proxyClient(inboundPort int, username, password string) *http.Client {
 	proxyURL := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", itoa(inboundPort))}
+	if username != "" {
+		proxyURL.User = url.UserPassword(username, password)
+	}
 	tr := &http.Transport{
 		Proxy:               http.ProxyURL(proxyURL),
 		DisableKeepAlives:   false,
@@ -248,47 +342,73 @@ func (p *Prober) proxyClient(inboundPort int) *http.Client {
 	return &http.Client{Transport: tr, Timeout: p.opt.ProbeTimeout}
 }
 
-func (p *Prober) probeOnce(ctx context.Context, client *http.Client, timeout time.Duration) (time.Duration, bool) {
+func (p *Prober) probeOnce(ctx context.Context, client *http.Client, timeout time.Duration) (time.Duration, bool, error) {
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, p.opt.ProbeURL, nil)
 	if err != nil {
-		return 0, false
+		return 0, false, nil
 	}
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, false
+		// HTTPS CONNECT authentication errors are returned by Transport, not as responses.
+		if strings.Contains(err.Error(), "Proxy Authentication Required") {
+			return 0, false, fmt.Errorf("inbound rejected proxy authentication")
+		}
+		return 0, false, nil
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return 0, false
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		return 0, false, fmt.Errorf("inbound rejected proxy authentication")
 	}
-	return time.Since(start), true
+	if resp.StatusCode >= 400 {
+		return 0, false, nil
+	}
+	return time.Since(start), true, nil
 }
 
-// freePorts reserves n distinct free loopback ports. It opens all n listeners,
-// simultaneously (so the ports are guaranteed distinct), records them, then
-// closes them right before xray binds. The brief close->bind window can race in
-// theory; a lost port just means that candidate's probes fail and it's dropped.
-func freePorts(n int) ([]int, error) {
+var portLeases = struct {
+	sync.Mutex
+	used map[int]bool
+}{used: make(map[int]bool)}
+
+// Leases prevent collisions with our other batches after reservation sockets close.
+// External listeners can still win that window, so authentication remains essential.
+func leasePorts(n int) ([]int, func(), error) {
+	portLeases.Lock()
+	defer portLeases.Unlock()
 	listeners := make([]net.Listener, 0, n)
 	ports := make([]int, 0, n)
-	for i := 0; i < n; i++ {
+	defer func() {
+		for _, l := range listeners {
+			_ = l.Close()
+		}
+	}()
+	for attempts := 0; len(ports) < n; attempts++ {
+		if attempts >= n+1000 {
+			return nil, nil, fmt.Errorf("could not allocate unleased ports")
+		}
 		l, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
-			for _, x := range listeners {
-				_ = x.Close()
-			}
-			return nil, err
+			return nil, nil, err
 		}
 		listeners = append(listeners, l)
-		ports = append(ports, l.Addr().(*net.TCPAddr).Port)
+		port := l.Addr().(*net.TCPAddr).Port
+		if !portLeases.used[port] {
+			ports = append(ports, port)
+		}
 	}
-	for _, l := range listeners {
-		_ = l.Close()
+	for _, port := range ports {
+		portLeases.used[port] = true
 	}
-	return ports, nil
+	return ports, func() {
+		portLeases.Lock()
+		defer portLeases.Unlock()
+		for _, port := range ports {
+			delete(portLeases.used, port)
+		}
+	}, nil
 }
 
 func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
@@ -300,12 +420,16 @@ func waitPort(ctx context.Context, port int, timeout time.Duration) bool {
 			return false
 		default:
 		}
-		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		conn, err := (&net.Dialer{Timeout: 200 * time.Millisecond}).DialContext(ctx, "tcp", addr)
 		if err == nil {
 			_ = conn.Close()
 			return true
 		}
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 	return false
 }

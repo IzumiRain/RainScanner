@@ -43,6 +43,10 @@ type BatchTarget struct {
 // process then serves the whole batch, so we pay one process spawn per ~50
 // candidates instead of one per candidate — the big Stage-2 speed/lag win.
 func GenerateBatchConfig(o *link.Outbound, targets []BatchTarget) ([]byte, error) {
+	return generateBatchConfig(o, targets, "", "")
+}
+
+func generateBatchConfig(o *link.Outbound, targets []BatchTarget, username, password string) ([]byte, error) {
 	inbounds := make([]any, 0, len(targets))
 	outbounds := make([]any, 0, len(targets))
 	rules := make([]any, 0, len(targets))
@@ -50,12 +54,16 @@ func GenerateBatchConfig(o *link.Outbound, targets []BatchTarget) ([]byte, error
 	for i, t := range targets {
 		inTag := "in-" + itoa(i)
 		outTag := "out-" + itoa(i)
+		settings := map[string]any{}
+		if username != "" {
+			settings["accounts"] = []any{map[string]any{"user": username, "pass": password}}
+		}
 
 		inbounds = append(inbounds, map[string]any{
 			"listen":   "127.0.0.1",
 			"port":     t.InboundPort,
 			"protocol": "http",
-			"settings": map[string]any{},
+			"settings": settings,
 			"tag":      inTag,
 		})
 

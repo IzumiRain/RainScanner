@@ -3,6 +3,7 @@
 ips/
 results/
 dist/
+node_modules/
 
 # Local release-style builds: scripts/fetch-xray.sh swaps the tracked
 # placeholder archives for ~20 MB real ones. Keep them out of commits with

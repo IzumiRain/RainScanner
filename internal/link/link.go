@@ -97,6 +97,16 @@ func substituteURLHost(raw, ip string, port int, scheme string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", scheme, err)
 	}
+	// Materialize defaults before changing the address they were derived from.
+	q := u.Query()
+	host := first(q.Get("host"), u.Hostname())
+	if q.Get("host") == "" {
+		q.Set("host", host)
+	}
+	if q.Get("sni") == "" {
+		q.Set("sni", host)
+	}
+	u.RawQuery = q.Encode()
 	p := u.Port()
 	if port > 0 {
 		p = strconv.Itoa(port)
@@ -118,6 +128,16 @@ func substituteVMess(raw, ip string, port int) (string, error) {
 	var m map[string]any
 	if err := json.Unmarshal(data, &m); err != nil {
 		return "", fmt.Errorf("vmess: json: %w", err)
+	}
+	o, err := parseVMess(raw)
+	if err != nil {
+		return "", err
+	}
+	if o.Host != "" {
+		m["host"] = o.Host
+	}
+	if o.SNI != "" {
+		m["sni"] = o.SNI
 	}
 	m["add"] = ip
 	if port > 0 {
@@ -274,6 +294,9 @@ func parseVMess(raw string) (*Outbound, error) {
 	}
 	if v.Net == "grpc" {
 		o.Service = v.Path
+	}
+	if o.Network == "tcp" {
+		o.HeaderType = v.Type
 	}
 	if v.ALPN != "" {
 		o.ALPN = splitCSV(v.ALPN)
