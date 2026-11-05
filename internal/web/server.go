@@ -8,6 +8,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -15,9 +16,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"cdnscan/internal/app"
@@ -39,7 +40,7 @@ type Server struct {
 	mu   sync.Mutex
 	jobs map[string]*job
 
-	scanning atomic.Bool
+	scanning bool // protected by mu together with cancel
 	cancel   context.CancelFunc
 }
 
@@ -408,6 +409,10 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many ports (max 64)", http.StatusBadRequest)
 		return
 	}
+	if req.Port < 0 || req.Port > 65535 {
+		http.Error(w, "invalid port", http.StatusBadRequest)
+		return
+	}
 	for _, p := range req.Ports {
 		if p < 1 || p > 65535 {
 			http.Error(w, fmt.Sprintf("invalid port %d", p), http.StatusBadRequest)
@@ -431,7 +436,8 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 
 	sreq := toScanRequest(req)
 
-	if !s.scanning.CompareAndSwap(false, true) {
+	ctx, cancel := s.beginScan()
+	if cancel == nil {
 		http.Error(w, "a scan is already running — wait for it to finish or stop it first", http.StatusConflict)
 		return
 	}
@@ -443,27 +449,38 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	go func() {
-		defer s.scanning.Store(false)
-		ctx, cancel := context.WithCancel(context.Background())
-		s.mu.Lock()
-		s.cancel = cancel
-		s.mu.Unlock()
-		defer func() {
-			cancel()
-			s.mu.Lock()
-			s.cancel = nil
-			s.mu.Unlock()
-		}()
+		defer cancel()
 		j.push(event{Type: "log", Line: "scan started"})
 		summaries, err := s.svc.Scan(ctx, sreq, hooks)
-		if err != nil {
+		status := "done"
+		if errors.Is(err, context.Canceled) {
+			status = "stopped"
+		} else if err != nil {
+			status = "error"
 			j.push(event{Type: "error", Line: err.Error()})
 		}
-		j.push(event{Type: "result", Data: buildResult(summaries, req.Link)})
-		j.finish()
+		if len(summaries) > 0 {
+			j.push(event{Type: "result", Data: buildResult(summaries, req.Link)})
+		}
+		s.mu.Lock()
+		s.cancel = nil
+		s.scanning = false
+		j.finish(status)
+		s.mu.Unlock()
 	}()
 
 	writeJSON(w, map[string]string{"id": j.id})
+}
+
+func (s *Server) beginScan() (context.Context, context.CancelFunc) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.scanning {
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.scanning, s.cancel = true, cancel
+	return ctx, cancel
 }
 
 // handleStop cancels the scan currently in progress. The running goroutine owns
@@ -480,10 +497,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	cancel := s.cancel
-	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	s.mu.Unlock()
 	writeJSON(w, map[string]bool{"stopping": true})
 }
 
@@ -524,6 +541,7 @@ func buildResult(summaries []pipeline.Summary, rawLink string) scanResult {
 func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	s.mu.Lock()
+	s.sweepJobsLocked()
 	j := s.jobs[id]
 	s.mu.Unlock()
 	if j == nil {
@@ -540,11 +558,37 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	idx := 0
+	lastID := r.Header.Get("Last-Event-ID")
+	if lastID == "" {
+		lastID = r.URL.Query().Get("after")
+	}
+	if lastID != "" {
+		var err error
+		idx, err = strconv.Atoi(lastID)
+		if err != nil || idx < 0 {
+			http.Error(w, "invalid event cursor", http.StatusBadRequest)
+			return
+		}
+		j.mu.Lock()
+		valid := idx <= len(j.events)
+		j.mu.Unlock()
+		if !valid {
+			http.Error(w, "event cursor is ahead of job", http.StatusBadRequest)
+			return
+		}
+	}
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
 	for {
+		// Capture the notification before the snapshot so a final push cannot
+		// leave us waiting on its unused replacement channel.
+		wake := j.wait()
 		evs, done := j.after(idx)
 		for _, e := range evs {
 			b, _ := json.Marshal(e)
-			fmt.Fprintf(w, "data: %s\n\n", b)
+			if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", idx+1, b); err != nil {
+				return
+			}
 			idx++
 		}
 		flusher.Flush()
@@ -554,7 +598,12 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case <-j.wait():
+		case <-wake:
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		}
 	}
 }
@@ -568,12 +617,13 @@ type event struct {
 }
 
 type job struct {
-	id        string
-	createdAt time.Time
-	mu        sync.Mutex
-	events    []event
-	done      bool
-	ch        chan struct{} // replaced on each push to broadcast
+	id         string
+	createdAt  time.Time
+	finishedAt time.Time
+	mu         sync.Mutex
+	events     []event
+	done       bool
+	ch         chan struct{} // replaced on each push to broadcast
 }
 
 func (s *Server) newJob() *job {
@@ -602,7 +652,7 @@ func (s *Server) sweepJobsLocked() {
 	cutoff := time.Now().Add(-time.Hour)
 	for id, j := range s.jobs {
 		j.mu.Lock()
-		reap := j.done && j.createdAt.Before(cutoff)
+		reap := j.done && j.finishedAt.Before(cutoff)
 		j.mu.Unlock()
 		if reap {
 			delete(s.jobs, id)
@@ -618,10 +668,11 @@ func (j *job) push(e event) {
 	j.mu.Unlock()
 }
 
-func (j *job) finish() {
+func (j *job) finish(status string) {
 	j.mu.Lock()
-	j.events = append(j.events, event{Type: "done"})
+	j.events = append(j.events, event{Type: "done", Data: map[string]string{"status": status}})
 	j.done = true
+	j.finishedAt = time.Now()
 	close(j.ch)
 	j.ch = make(chan struct{})
 	j.mu.Unlock()

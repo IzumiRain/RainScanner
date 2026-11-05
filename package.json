@@ -1,0 +1,13 @@
+{
+  "name": "rainscanner-browser-tests",
+  "private": true,
+  "scripts": {
+    "test:browser": "node tests/browser.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "playwright-core": "1.63.0"
+  }
+}

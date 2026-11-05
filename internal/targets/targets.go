@@ -16,6 +16,7 @@ package targets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -38,6 +39,9 @@ type Record struct {
 	Builtin bool     `json:"builtin"` // true => one of the compiled-in default CDNs
 }
 
+// ErrStaleReload means the target changed or was deleted while its feed was fetched.
+var ErrStaleReload = errors.New("target changed during reload")
+
 // Registry is a concurrency-safe in-memory collection of targets. It is the
 // source of truth during a run; mutations are flushed through the storage.Store
 // (built-in range edits to ips/<name>.json, custom edits to ips/custom.json).
@@ -46,15 +50,17 @@ type Registry struct {
 	builtinNames map[string]bool // names seeded from the active manifest
 	hidden       map[string]bool // built-in names the user deleted locally
 
-	mu   sync.Mutex
-	recs []Record
+	mu        sync.Mutex
+	recs      []Record
+	revisions map[string]uint64
+	revision  uint64
 }
 
 // Open builds a Registry: built-in CDNs seeded from the active manifest (with
 // cached ranges from the store), minus any the user has deleted, then user
 // customs loaded from the store.
 func Open(store storage.Store) (*Registry, error) {
-	r := &Registry{store: store, builtinNames: map[string]bool{}, hidden: map[string]bool{}}
+	r := &Registry{store: store, builtinNames: map[string]bool{}, hidden: map[string]bool{}, revisions: map[string]uint64{}}
 
 	hidden, err := store.LoadHidden()
 	if err != nil {
@@ -65,6 +71,9 @@ func Open(store storage.Store) (*Registry, error) {
 	}
 
 	for _, entry := range providers.Entries() {
+		if !providers.SafeRangeName(entry.Name) {
+			continue
+		}
 		lower := strings.ToLower(entry.Name)
 		r.builtinNames[lower] = true
 		if r.hidden[lower] {
@@ -73,6 +82,9 @@ func Open(store storage.Store) (*Registry, error) {
 		rec := Record{Name: entry.Name, Builtin: true, APIURL: entry.APIURL}
 		if rf, err := store.Ranges(entry.Name); err == nil {
 			rec.CIDRs = rf.CIDRs
+			if rf.APIURL != "" {
+				rec.APIURL = rf.APIURL
+			}
 		}
 		r.recs = append(r.recs, rec)
 	}
@@ -108,10 +120,10 @@ func (r *Registry) RestoreBuiltins() ([]string, error) {
 		for lower := range r.hidden {
 			restored[lower] = true
 		}
-		r.hidden = map[string]bool{}
-		if err := r.saveHiddenLocked(); err != nil {
+		if err := r.store.SaveHidden(nil); err != nil {
 			return nil, err
 		}
+		r.hidden = map[string]bool{}
 	}
 	// Ensure every manifest built-in is present (re-add the un-hidden ones and any
 	// newly-published upstream CDN). Existing records are left as-is; ReloadAll
@@ -130,8 +142,12 @@ func (r *Registry) RestoreBuiltins() ([]string, error) {
 		rec := Record{Name: entry.Name, Builtin: true, APIURL: entry.APIURL}
 		if rf, err := r.store.Ranges(entry.Name); err == nil {
 			rec.CIDRs = rf.CIDRs
+			if rf.APIURL != "" {
+				rec.APIURL = rf.APIURL
+			}
 		}
 		r.recs = append(r.recs, rec)
+		r.bumpRevisionLocked(rec.Name)
 		restored[lower] = true
 	}
 
@@ -151,6 +167,9 @@ func (r *Registry) List() []Record {
 	defer r.mu.Unlock()
 	out := make([]Record, len(r.recs))
 	copy(out, r.recs)
+	for i := range out {
+		out[i].CIDRs = append([]string(nil), out[i].CIDRs...)
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Builtin != out[j].Builtin {
 			return out[i].Builtin // built-ins first
@@ -165,7 +184,9 @@ func (r *Registry) Get(name string) (Record, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if i := r.indexOf(name); i >= 0 {
-		return r.recs[i], true
+		rec := r.recs[i]
+		rec.CIDRs = append([]string(nil), rec.CIDRs...)
+		return rec, true
 	}
 	return Record{}, false
 }
@@ -182,11 +203,13 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 		return Record{}, fmt.Errorf("target name is required")
 	}
 	rec.CIDRs = iprange.Filter(rec.CIDRs, iprange.FamilyAuto)
-	if api := strings.TrimSpace(rec.APIURL); api != "" {
+	rec.APIURL = strings.TrimSpace(rec.APIURL)
+	apiProvided := rec.APIURL != ""
+	if api := rec.APIURL; api != "" {
 		// The API URL is fetched server-side on reload; only http(s) is
 		// accepted so neither file:// nor exotic schemes can ever reach
 		// url.Open-equivalent sinks downstream.
-		if u, err := url.Parse(api); err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		if u, err := url.Parse(api); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return Record{}, fmt.Errorf("api_url must be an http(s) URL")
 		}
 	}
@@ -198,30 +221,48 @@ func (r *Registry) Upsert(rec Record) (Record, error) {
 	isBuiltin := r.builtinNames[lower]
 	rec.Builtin = isBuiltin
 
-	// Re-adding a previously-deleted built-in un-hides it so it sticks across
-	// restarts (otherwise Open would skip it again).
-	if isBuiltin && r.hidden[lower] {
-		delete(r.hidden, lower)
-		if err := r.saveHiddenLocked(); err != nil {
-			return Record{}, err
+	if isBuiltin {
+		if entry, ok := providers.GetEntry(rec.Name); ok {
+			rec.Name = entry.Name
+			if rec.APIURL == "" {
+				rec.APIURL = entry.APIURL
+			}
 		}
 	}
 
+	next := append([]Record(nil), r.recs...)
 	if i := r.indexOf(rec.Name); i >= 0 {
-		// Preserve the canonical name's existing casing/flag for built-ins.
+		// Names are case-insensitive identities; retain their persisted spelling.
+		rec.Name = r.recs[i].Name
 		rec.Builtin = r.recs[i].Builtin || isBuiltin
 		// Preserve the existing APIURL if the caller didn't supply one.
-		if rec.APIURL == "" {
+		if !apiProvided {
 			rec.APIURL = r.recs[i].APIURL
 		}
-		r.recs[i] = rec
+		next[i] = rec
 	} else {
-		r.recs = append(r.recs, rec)
+		next = append(next, rec)
 	}
 
-	if err := r.persistLocked(rec); err != nil {
+	if err := r.persistLocked(rec, next); err != nil {
 		return Record{}, err
 	}
+	if isBuiltin && r.hidden[lower] {
+		names := make([]string, 0, len(r.hidden)-1)
+		for name := range r.hidden {
+			if name != lower {
+				names = append(names, name)
+			}
+		}
+		sort.Strings(names)
+		if err := r.store.SaveHidden(names); err != nil {
+			return Record{}, err
+		}
+		delete(r.hidden, lower)
+	}
+	r.recs = next
+	r.bumpRevisionLocked(rec.Name)
+	rec.CIDRs = append([]string(nil), rec.CIDRs...)
 	return rec, nil
 }
 
@@ -237,18 +278,25 @@ func (r *Registry) Delete(name string) (bool, error) {
 	if i < 0 {
 		return false, nil
 	}
-	wasBuiltin := r.recs[i].Builtin
-	r.recs = append(r.recs[:i], r.recs[i+1:]...)
-	if wasBuiltin {
-		r.hidden[strings.ToLower(name)] = true
-		if err := r.saveHiddenLocked(); err != nil {
+	rec := r.recs[i]
+	next := append([]Record(nil), r.recs[:i]...)
+	next = append(next, r.recs[i+1:]...)
+	if rec.Builtin {
+		names := make([]string, 0, len(r.hidden)+1)
+		for name := range r.hidden {
+			names = append(names, name)
+		}
+		names = append(names, strings.ToLower(rec.Name))
+		sort.Strings(names)
+		if err := r.store.SaveHidden(names); err != nil {
 			return false, err
 		}
-		return true, nil
-	}
-	if err := r.saveCustomsLocked(); err != nil {
+		r.hidden[strings.ToLower(rec.Name)] = true
+	} else if err := r.saveCustomsLocked(next); err != nil {
 		return false, err
 	}
+	r.recs = next
+	delete(r.revisions, rec.Name)
 	return true, nil
 }
 
@@ -257,15 +305,20 @@ func (r *Registry) Delete(name string) (bool, error) {
 // per opts). Built-ins with a user-overridden API URL, and all customs, are scraped
 // via ScrapeCIDRs. The refreshed record is returned.
 func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts providers.FetchOptions) (Record, error) {
-	rec, ok := r.Get(name)
-	if !ok {
+	r.mu.Lock()
+	i := r.indexOf(name)
+	if i < 0 {
+		r.mu.Unlock()
 		return Record{}, fmt.Errorf("unknown target %q", name)
 	}
+	rec := r.recs[i]
+	revision := r.revisions[rec.Name]
+	r.mu.Unlock()
 
 	var cidrs []string
 	var err error
 
-	if entry, isBuiltin := providers.GetEntry(name); isBuiltin && rec.APIURL == entry.APIURL {
+	if entry, isBuiltin := providers.GetEntry(rec.Name); isBuiltin && rec.Builtin && rec.APIURL == entry.APIURL {
 		// Unmodified built-in feed: use full FetchRanges (official→backup per opts).
 		cidrs, _, err = providers.FetchRanges(ctx, c, entry, opts)
 	} else {
@@ -279,10 +332,35 @@ func (r *Registry) Reload(ctx context.Context, c *http.Client, name string, opts
 	if err != nil {
 		return Record{}, err
 	}
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
 	cidrs = iprange.Filter(cidrs, iprange.FamilyAuto)
 	iprange.Sort(cidrs)
 	rec.CIDRs = cidrs
-	return r.Upsert(rec)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return Record{}, err
+	}
+	i = r.indexOf(rec.Name)
+	if i < 0 || r.revisions[r.recs[i].Name] != revision {
+		return Record{}, fmt.Errorf("%s: %w", rec.Name, ErrStaleReload)
+	}
+	next := append([]Record(nil), r.recs...)
+	next[i] = rec
+	if err := r.persistLocked(rec, next); err != nil {
+		return Record{}, err
+	}
+	r.recs = next
+	r.bumpRevisionLocked(rec.Name)
+	rec.CIDRs = append([]string(nil), rec.CIDRs...)
+	return rec, nil
+}
+
+func (r *Registry) bumpRevisionLocked(name string) {
+	r.revision++
+	r.revisions[name] = r.revision
 }
 
 // indexOf returns the position of name (case-insensitive) or -1. Caller holds mu.
@@ -297,36 +375,31 @@ func (r *Registry) indexOf(name string) int {
 }
 
 // persistLocked writes a record to the right place via the store. Caller holds mu.
-func (r *Registry) persistLocked(rec Record) error {
+func (r *Registry) persistLocked(rec Record, recs []Record) error {
 	if rec.Builtin {
+		override := rec.APIURL
+		if override == providers.APIURL(rec.Name) {
+			override = ""
+		}
 		return r.store.SaveRanges(&providers.RangeFile{
 			CDN:       rec.Name,
 			FetchedAt: time.Now().UTC().Format(time.RFC3339),
 			Count:     len(rec.CIDRs),
 			CIDRs:     rec.CIDRs,
+			APIURL:    override,
 		})
 	}
-	return r.saveCustomsLocked()
+	return r.saveCustomsLocked(recs)
 }
 
 // saveCustomsLocked rewrites custom storage from the current custom records.
 // Caller holds mu.
-func (r *Registry) saveCustomsLocked() error {
+func (r *Registry) saveCustomsLocked(recs []Record) error {
 	var customs []storage.CustomTarget
-	for _, rec := range r.recs {
+	for _, rec := range recs {
 		if !rec.Builtin {
 			customs = append(customs, storage.CustomTarget{Name: rec.Name, CIDRs: rec.CIDRs, APIURL: rec.APIURL})
 		}
 	}
 	return r.store.SaveCustoms(customs)
-}
-
-// saveHiddenLocked persists the set of deleted built-in names. Caller holds mu.
-func (r *Registry) saveHiddenLocked() error {
-	names := make([]string, 0, len(r.hidden))
-	for name := range r.hidden {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return r.store.SaveHidden(names)
 }

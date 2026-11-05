@@ -4,6 +4,8 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"runtime"
@@ -104,7 +106,8 @@ type Summary struct {
 	Entries   []output.Entry `json:"entries"`   // Xray-confirmed clean IPs
 }
 
-// Run executes the full pipeline for each selected CDN.
+// Run executes the full pipeline for each selected CDN. Summaries include partial
+// work for failed targets; joined errors retain errors.Is cancellation semantics.
 func Run(ctx context.Context, cfg Config) ([]Summary, error) {
 	if cfg.Log == nil {
 		cfg.Log = func(string, ...any) {}
@@ -124,21 +127,25 @@ func Run(ctx context.Context, cfg Config) ([]Summary, error) {
 		s, err := runOne(ctx, cfg, cfg.Custom.Name, cfg.Custom.CIDRs)
 		if err != nil {
 			cfg.Log("[%s] error: %v", cfg.Custom.Name, err)
-			return nil, nil
+			return []Summary{s}, fmt.Errorf("%s: %w", cfg.Custom.Name, err)
 		}
 		return []Summary{s}, nil
 	}
 
 	var summaries []Summary
+	var errs []error
 	for _, cdn := range cfg.CDNs {
 		s, err := runOne(ctx, cfg, cdn, nil)
 		if err != nil {
 			cfg.Log("[%s] error: %v", cdn, err)
-			continue
+			errs = append(errs, fmt.Errorf("%s: %w", cdn, err))
 		}
 		summaries = append(summaries, s)
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	return summaries, nil
+	return summaries, errors.Join(errs...)
 }
 
 // resolveFamily turns the "auto" default into a concrete choice. Auto means
@@ -170,6 +177,9 @@ func (cfg Config) ports() []int {
 // directly (custom-range mode).
 func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summary, error) {
 	s := Summary{CDN: name}
+	if err := ctx.Err(); err != nil {
+		return s, err
+	}
 
 	var source string
 	if cidrs == nil {
@@ -194,7 +204,7 @@ func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summa
 		cfg.Log("[%s] %d CIDR ranges — %d IPv4 / %d IPv6", name, s.Ranges, s.RangesV4, s.RangesV6)
 	}
 
-	hosts, err := iprange.Expand(cidrs, cfg.Sample)
+	hosts, err := iprange.ExpandContext(ctx, cidrs, cfg.Sample)
 	if err != nil {
 		return s, err
 	}
@@ -213,18 +223,32 @@ func runOne(ctx context.Context, cfg Config, name string, cidrs []string) (Summa
 	s.TCPOpen = len(survivors)
 	s.Endpoints = survivors
 	cfg.Log("[%s] stage1: %d reachable endpoint(s) on ports %v", name, len(survivors), cfg.ports())
+	if err := ctx.Err(); err != nil {
+		return s, err
+	}
+	// TCP reachability is not confirmation. Never replace confirmed results
+	// with an empty file just because this run did not request Xray probing.
+	if cfg.Prober == nil {
+		return s, nil
+	}
 
 	// Stage 2: Xray real-latency confirmation.
-	entries := stage2(ctx, cfg, name, survivors)
+	entries, err := stage2(ctx, cfg, name, survivors)
 	s.Confirmed = len(entries)
+	s.Entries = entries
+	if err != nil {
+		return s, err
+	}
 	cfg.Log("[%s] stage2: %d confirmed clean IPs", name, len(entries))
+	if err := ctx.Err(); err != nil {
+		return s, err
+	}
 
-	path, err := output.Write(cfg.ResultsDir, name, entries)
+	path, err := output.WriteContext(ctx, cfg.ResultsDir, name, entries)
 	if err != nil {
 		return s, err
 	}
 	s.OutPath = path
-	s.Entries = entries
 	return s, nil
 }
 
@@ -261,9 +285,9 @@ func stage1(ctx context.Context, cfg Config, cdn string, hosts []netip.Addr) []E
 // into batches of cfg.BatchSize; each batch is tested by a single xray process,
 // and up to cfg.XrayConcurrency batches run concurrently. This amortises the
 // expensive per-process spawn — the dominant Stage-2 cost — across the batch.
-func stage2(ctx context.Context, cfg Config, cdn string, survivors []Endpoint) []output.Entry {
+func stage2(ctx context.Context, cfg Config, cdn string, survivors []Endpoint) ([]output.Entry, error) {
 	if cfg.Prober == nil || len(survivors) == 0 {
-		return nil
+		return nil, ctx.Err()
 	}
 	total := len(survivors)
 	step := total / 100
@@ -276,13 +300,14 @@ func stage2(ctx context.Context, cfg Config, cdn string, survivors []Endpoint) [
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var entries []output.Entry
+	var errs []error
 	var done int64
 
+launch:
 	for _, batch := range batches {
 		select {
 		case <-ctx.Done():
-			wg.Wait()
-			return entries
+			break launch
 		case sem <- struct{}{}:
 		}
 		wg.Add(1)
@@ -304,9 +329,13 @@ func stage2(ctx context.Context, cfg Config, cdn string, survivors []Endpoint) [
 			}
 
 			results := cfg.Prober.TestBatch(ctx, items)
+			var batchErr error
 			for i, tr := range results {
 				ep := idx[i]
-				if tr.OK {
+				if batchErr == nil {
+					batchErr = stage2ResultError(ep, tr)
+				}
+				if tr.OK && tr.Err == "" {
 					mu.Lock()
 					entries = append(entries, output.Entry{
 						IP:        ep.IP,
@@ -321,10 +350,22 @@ func stage2(ctx context.Context, cfg Config, cdn string, survivors []Endpoint) [
 				nd := atomic.AddInt64(&done, 1)
 				reportXrayProgress(cfg, cdn, int(nd), total, step)
 			}
+			if batchErr != nil {
+				mu.Lock()
+				errs = append(errs, batchErr)
+				mu.Unlock()
+			}
 		}(batch)
 	}
 	wg.Wait()
-	return entries
+	return entries, errors.Join(append(errs, ctx.Err())...)
+}
+
+func stage2ResultError(ep Endpoint, tr xray.TestResult) error {
+	if xray.IsInfrastructureError(tr.Err) {
+		return fmt.Errorf("stage2 %s:%d: %s", ep.IP, ep.Port, tr.Err)
+	}
+	return nil
 }
 
 func reportXrayProgress(cfg Config, cdn string, done, total, step int) {
