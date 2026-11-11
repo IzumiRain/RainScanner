@@ -5,7 +5,7 @@
 // The two families are expanded very differently, because their host spaces are
 // nothing alike:
 //
-//   - An IPv4 prefix is walked with a deterministic stride. A /24-sampled run is
+//   - An IPv4 prefix uses deterministic, evenly spaced samples. A /24-sampled run is
 //     therefore reproducible, and a whole /12 can still be enumerated exactly.
 //   - An IPv6 prefix cannot be walked at all: a single /64 holds 1.8e19 hosts, so
 //     "every Nth address" would never leave the bottom of the block and a stride
@@ -16,6 +16,7 @@
 package iprange
 
 import (
+	"context"
 	"encoding/binary"
 	"fmt"
 	"math/rand/v2"
@@ -86,16 +87,21 @@ func (f Family) Allows(addr netip.Addr) bool {
 
 // Strategy controls how a CIDR is expanded.
 type Strategy struct {
-	// SamplePer24 limits how many hosts are emitted from each /24 worth of
-	// space. 0 means "emit every host" (full enumeration). IPv4 only — there is
-	// no useful IPv6 analogue, since a v6 prefix holds more /24-equivalents than
+	// SamplePer24 emits exactly min(N, 256) evenly spaced hosts per IPv4 /24.
+	// Smaller prefixes emit ceil(size*N/256), capped at their size, so every
+	// nonempty prefix contributes at least one host. 0 means full enumeration.
+	// MaxHostsPerCIDR and MaxTotal can further reduce these counts.
+	// IPv4 only: there is no useful IPv6 analogue, since a v6 prefix holds more
+	// /24-equivalents than
 	// the entire IPv4 internet.
 	SamplePer24 int
 	// MaxHostsPerCIDR caps total hosts emitted from a single CIDR. 0 = no cap
 	// for IPv4; for IPv6 see MaxHostsPerV6CIDR (there is no uncapped v6 mode).
 	MaxHostsPerCIDR int
 	// MaxTotal caps the total number of hosts emitted across ALL CIDRs by
-	// randomly sampling the pool (reservoir sampling). 0 = no cap (full pool).
+	// uniformly sampling candidate indices without enumerating the pool.
+	// Overlapping input ranges can yield fewer distinct hosts than this cap.
+	// 0 = no cap (full pool).
 	// This is the "scan N random IPs out of millions" control: memory stays
 	// bounded at MaxTotal regardless of pool size, which keeps huge providers
 	// (e.g. Cloudflare's ~1.5M IPs) light on low-end machines.
@@ -112,70 +118,29 @@ type Strategy struct {
 // Expand turns a list of CIDR strings into deduplicated host addresses of the
 // selected families. Entries of an excluded family are skipped silently; an
 // entry that is not a valid CIDR or IP at all is an error. A deterministic
-// stride is used for IPv4 per-/24 sampling so those runs are reproducible; IPv6
+// spacing is used for IPv4 per-/24 sampling so those runs are reproducible; IPv6
 // prefixes and MaxTotal sampling are intentionally non-deterministic.
 func Expand(cidrs []string, s Strategy) ([]netip.Addr, error) {
-	// In random-sample mode memory is bounded to MaxTotal via reservoir
-	// sampling, and the global dedup map is skipped (CDN CIDRs are disjoint, so
-	// the only possible dups are operator-supplied overlaps — negligible). In
-	// full mode we dedup exactly as before.
-	var (
-		seen map[netip.Addr]struct{}
-		out  []netip.Addr
-		n    int // unique candidates considered so far (reservoir counter)
-	)
+	return ExpandContext(context.Background(), cidrs, s)
+}
 
-	// Guard the unbounded default: "no caps at all" fully enumerates the pool,
-	// which is fine for real CDN allocations (~1.5M hosts) but fatal for a
-	// hand-typed 0.0.0.0/0 (hundreds of GB of address book). Full enumeration of
-	// an oversized pool silently downgrades to a bounded reservoir sample
-	// instead of OOM-killing the process; any explicit cap is honored as-is.
-	const maxAutoPool = 1 << 22
-	if s.MaxTotal <= 0 && s.MaxHostsPerCIDR <= 0 && s.SamplePer24 <= 0 {
-		var total uint64
-		for _, c := range cidrs {
-			if p, err := netip.ParsePrefix(strings.TrimSpace(c)); err == nil && p.Addr().Is4() {
-				if b := 32 - p.Bits(); b < 63 {
-					total += uint64(1) << uint(b)
-				} else {
-					total = ^uint64(0)
-					break
-				}
-			}
-		}
-		if total > maxAutoPool {
-			s.MaxTotal = maxAutoPool
-		}
+// ExpandContext is Expand with interruptible parsing and address generation.
+// MaxTotal samples a virtual pool in O(len(cidrs) + MaxTotal*log(len(cidrs)))
+// work, rather than visiting billions of addresses in a large IPv4 prefix.
+func ExpandContext(ctx context.Context, cidrs []string, s Strategy) ([]netip.Addr, error) {
+	type pool struct {
+		prefix netip.Prefix
+		count  uint64
+		end    uint64
+		drawn  map[netip.Addr]struct{}
+		tries  uint64
 	}
-
-	if s.MaxTotal <= 0 {
-		seen = make(map[netip.Addr]struct{})
-	}
-
-	emit := func(a netip.Addr) {
-		if seen != nil {
-			if _, dup := seen[a]; dup {
-				return
-			}
-			seen[a] = struct{}{}
-		}
-		if s.MaxTotal <= 0 {
-			out = append(out, a)
-			return
-		}
-		// Reservoir sampling: keep the first MaxTotal, then each later item has
-		// a MaxTotal/n chance of replacing a random slot.
-		n++
-		if len(out) < s.MaxTotal {
-			out = append(out, a)
-			return
-		}
-		if j := rand.IntN(n); j < s.MaxTotal {
-			out[j] = a
-		}
-	}
-
+	var pools []pool
+	var total uint64
 	for _, c := range cidrs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		p, err := netip.ParsePrefix(strings.TrimSpace(c))
 		if err != nil {
 			// Allow a bare IP as a single-host prefix.
@@ -183,97 +148,127 @@ func Expand(cidrs []string, s Strategy) ([]netip.Addr, error) {
 			if aerr != nil {
 				return nil, fmt.Errorf("invalid CIDR %q: %w", c, err)
 			}
-			if s.Family.Allows(a) {
-				emit(a.Unmap())
-			}
-			continue
+			a = a.Unmap()
+			p = netip.PrefixFrom(a, a.BitLen())
 		}
 		p = p.Masked()
 		if !s.Family.Allows(p.Addr()) {
 			continue
 		}
+		var count uint64
 		if p.Addr().Is4() {
-			expandPrefix4(p, s, emit)
+			count = countPrefix4(p, s)
 		} else {
-			expandPrefix6(p, s, emit)
+			limit := s.MaxHostsPerV6CIDR
+			if limit <= 0 {
+				limit = DefaultV6HostsPerCIDR
+			}
+			count = uint64(limit)
+			if bits := 128 - p.Bits(); bits < 63 {
+				count = min(count, uint64(1)<<uint(bits))
+			}
+			if s.MaxHostsPerCIDR > 0 {
+				count = min(count, uint64(s.MaxHostsPerCIDR))
+			}
 		}
+		if count > ^uint64(0)-total {
+			return nil, fmt.Errorf("candidate pool too large")
+		}
+		total += count
+		pools = append(pools, pool{prefix: p, count: count, end: total})
 	}
-	return out, nil
-}
-
-func expandPrefix4(p netip.Prefix, s Strategy, emit func(netip.Addr)) {
-	bits := p.Bits()
-	hostBits := 32 - bits
-	total := uint64(1) << uint(hostBits)
-
-	// Determine stride for sampling.
-	stride := uint64(1)
-	if s.SamplePer24 > 0 && hostBits > 8 {
-		// number of /24s in this prefix
-		num24 := uint64(1) << uint(hostBits-8)
-		want := num24 * uint64(s.SamplePer24)
-		if want < total && want > 0 {
-			stride = total / want
-			if stride == 0 {
-				stride = 1
+	const maxAutoPool = 1 << 22
+	if s.MaxTotal <= 0 && s.MaxHostsPerCIDR <= 0 && s.SamplePer24 <= 0 && total > maxAutoPool {
+		s.MaxTotal = maxAutoPool
+	}
+	seen := make(map[netip.Addr]struct{})
+	var out []netip.Addr
+	emit := func(index uint64) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		i := sort.Search(len(pools), func(i int) bool { return pools[i].end > index })
+		p := &pools[i]
+		rank := index - (p.end - p.count)
+		var a netip.Addr
+		if p.prefix.Addr().Is4() {
+			size := uint64(1) << uint(32-p.prefix.Bits())
+			offset := rank
+			if s.SamplePer24 > 0 {
+				n := uint64(min(s.SamplePer24, 256))
+				if size >= 256 {
+					offset = rank/n*256 + (rank%n)*256/n
+				} else {
+					offset = rank * size / ((size*n + 255) / 256)
+				}
+			}
+			a = u32ToIP(ipToU32(p.prefix.Addr().As4()) + uint32(offset))
+		} else {
+			b := p.prefix.Addr().As16()
+			hi, lo := binary.BigEndian.Uint64(b[:8]), binary.BigEndian.Uint64(b[8:])
+			bits := 128 - p.prefix.Bits()
+			if bits < 63 && uint64(1)<<uint(bits) == p.count {
+				a = addr16(hi, lo+rank)
+			} else {
+				// Retry collisions within this bounded sample, not the full space.
+				if p.drawn == nil {
+					p.drawn = make(map[netip.Addr]struct{})
+				}
+				for {
+					if p.tries >= p.count*4 {
+						return nil
+					}
+					p.tries++
+					if err := ctx.Err(); err != nil {
+						return err
+					}
+					a = randomIn6(hi, lo, bits)
+					if _, dup := p.drawn[a]; !dup {
+						p.drawn[a] = struct{}{}
+						break
+					}
+				}
+			}
+		}
+		if _, dup := seen[a]; !dup {
+			seen[a] = struct{}{}
+			out = append(out, a)
+		}
+		return nil
+	}
+	if s.MaxTotal > 0 && uint64(s.MaxTotal) < total {
+		// Floyd's algorithm selects distinct indices using only O(MaxTotal) space.
+		selected := make(map[uint64]struct{}, min(s.MaxTotal, 1024))
+		for j := total - uint64(s.MaxTotal); j < total; j++ {
+			index := rand.Uint64N(j + 1)
+			if _, exists := selected[index]; exists {
+				index = j
+			}
+			selected[index] = struct{}{}
+			if err := emit(index); err != nil {
+				return nil, err
+			}
+		}
+	} else {
+		for i := uint64(0); i < total; i++ {
+			if err := emit(i); err != nil {
+				return nil, err
 			}
 		}
 	}
-
-	emitted := 0
-	start := ipToU32(p.Addr().As4())
-
-	for i := uint64(0); i < total; i += stride {
-		if s.MaxHostsPerCIDR > 0 && emitted >= s.MaxHostsPerCIDR {
-			break
-		}
-		emit(u32ToIP(start + uint32(i)))
-		emitted++
-	}
+	return out, ctx.Err()
 }
 
-// expandPrefix6 draws host addresses from an IPv6 prefix. Prefixes small enough
-// to fit inside the budget are enumerated exactly (so a /126 of four addresses
-// behaves like its IPv4 counterpart); everything larger is sampled uniformly at
-// random, because striding a /64 would only ever probe the first few addresses
-// of a block whose whole span answers.
-func expandPrefix6(p netip.Prefix, s Strategy, emit func(netip.Addr)) {
-	hostBits := 128 - p.Bits()
-	limit := s.MaxHostsPerV6CIDR
-	if limit <= 0 {
-		limit = DefaultV6HostsPerCIDR
+func countPrefix4(p netip.Prefix, s Strategy) uint64 {
+	size := uint64(1) << uint(32-p.Bits())
+	count := size
+	if s.SamplePer24 > 0 {
+		count = (size*uint64(min(s.SamplePer24, 256)) + 255) / 256
 	}
-	if s.MaxHostsPerCIDR > 0 && s.MaxHostsPerCIDR < limit {
-		limit = s.MaxHostsPerCIDR
+	if s.MaxHostsPerCIDR > 0 {
+		count = min(count, uint64(s.MaxHostsPerCIDR))
 	}
-
-	base := p.Addr().As16()
-	hi := binary.BigEndian.Uint64(base[:8])
-	lo := binary.BigEndian.Uint64(base[8:])
-
-	// Small enough to enumerate exactly? (hostBits < 63 keeps 1<<hostBits from
-	// overflowing; anything at or above that is astronomically over the limit.)
-	if hostBits < 63 {
-		if total := uint64(1) << uint(hostBits); total <= uint64(limit) {
-			for i := range total {
-				emit(addr16(hi, lo+i))
-			}
-			return
-		}
-	}
-
-	// Bounded uniform sample. Dedup within the prefix so a collision shrinks the
-	// number of draws rather than the number of distinct hosts returned; the
-	// retry budget stops a pathological small prefix from spinning.
-	drawn := make(map[netip.Addr]struct{}, limit)
-	for tries := 0; len(drawn) < limit && tries < limit*4; tries++ {
-		a := randomIn6(hi, lo, hostBits)
-		if _, dup := drawn[a]; dup {
-			continue
-		}
-		drawn[a] = struct{}{}
-		emit(a)
-	}
+	return count
 }
 
 // randomIn6 returns a uniformly random address inside the prefix whose masked

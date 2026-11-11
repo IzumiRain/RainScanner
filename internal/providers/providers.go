@@ -61,6 +61,9 @@ type RangeFile struct {
 	Count     int      `json:"count"`
 	CIDRs     []string `json:"cidrs"`
 	Source    string   `json:"source,omitempty"` // "official"|"jsdelivr"|"github-raw"|"manual"|""
+	// APIURL preserves a locally configured builtin feed. Older files omit it
+	// and continue to use the active manifest's URL.
+	APIURL string `json:"api_url,omitempty"`
 }
 
 // ── Package-level manifest state ─────────────────────────────────────────────
@@ -191,7 +194,7 @@ func saveLocalManifest(ipsDir string, m *ManifestIndex) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(ipsDir, "index.json"), b, 0o644)
+	return writeAtomic(filepath.Join(ipsDir, "index.json"), b)
 }
 
 func loadLocalManifest(ipsDir string) (*ManifestIndex, error) {
@@ -212,12 +215,22 @@ func loadLocalManifest(ipsDir string) (*ManifestIndex, error) {
 // source ∈ {"official","jsdelivr","github-raw","manual"}.
 // Returns an error only when ALL attempted sources fail.
 func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts FetchOptions) ([]string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	official := func() ([]string, string, error) {
 		cidrs, err := runParser(ctx, c, entry)
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
 		return cidrs, "official", err
 	}
 	backup := func() ([]string, string, error) {
-		return fetchBackupFile(ctx, c, entry.Name)
+		cidrs, source, err := fetchBackupFile(ctx, c, entry.Name)
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
+		return cidrs, source, err
 	}
 
 	// manual parser: never call official; backup-only.
@@ -254,6 +267,9 @@ func FetchRanges(ctx context.Context, c *http.Client, entry ManifestEntry, opts 
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, "", err
+	}
 	return nil, "", fmt.Errorf("%s: all sources failed: %w", entry.Name, lastErr)
 }
 
@@ -274,6 +290,9 @@ func fetchBackupFile(ctx context.Context, c *http.Client, name string) ([]string
 	for _, cand := range cands {
 		b, err := httpGet(ctx, c, cand.url)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, "", ctx.Err()
+			}
 			continue
 		}
 		var rf RangeFile
@@ -321,6 +340,9 @@ func scrapeBothFamilies(ctx context.Context, c *http.Client, entry ManifestEntry
 		return primary, err
 	}
 	v6, v6err := ScrapeCIDRs(ctx, c, entry.APIURLv6)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	switch {
 	case err != nil && v6err != nil:
 		return nil, err
@@ -503,7 +525,7 @@ func Refresh(ctx context.Context, c *http.Client, name, ipsDir string, opts Fetc
 	cidrs = iprange.Filter(cidrs, iprange.FamilyAuto)
 	sortCIDRs(cidrs)
 	rf := &RangeFile{
-		CDN:       name,
+		CDN:       entry.Name,
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
 		Count:     len(cidrs),
 		CIDRs:     cidrs,
@@ -517,6 +539,9 @@ func Refresh(ctx context.Context, c *http.Client, name, ipsDir string, opts Fetc
 
 // Load reads a cached ips/<cdn>.json.
 func Load(ipsDir, name string) (*RangeFile, error) {
+	if !SafeRangeName(name) {
+		return nil, fmt.Errorf("unsafe CDN name %q", name)
+	}
 	path := filepath.Join(ipsDir, name+".json")
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -538,7 +563,15 @@ var safeRangeNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`)
 // SafeRangeName reports whether a CDN name is safe to persist as
 // ipsDir/<name>.json unsanitized.
 func SafeRangeName(name string) bool {
-	return safeRangeNameRe.MatchString(strings.TrimSpace(name))
+	if name != strings.TrimSpace(name) || strings.HasSuffix(name, ".") || !safeRangeNameRe.MatchString(name) {
+		return false
+	}
+	base := strings.ToLower(strings.SplitN(name, ".", 2)[0])
+	switch base {
+	case "custom", "index", "con", "prn", "aux", "nul", "conin$", "conout$":
+		return false
+	}
+	return !(len(base) == 4 && (strings.HasPrefix(base, "com") || strings.HasPrefix(base, "lpt")) && base[3] >= '1' && base[3] <= '9')
 }
 
 // Save writes ips/<cdn>.json (pretty-printed, deterministic). The name is
@@ -554,7 +587,27 @@ func Save(ipsDir string, rf *RangeFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(ipsDir, rf.CDN+".json"), b, 0o644)
+	return writeAtomic(filepath.Join(ipsDir, rf.CDN+".json"), b)
+}
+
+func writeAtomic(path string, b []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".ranges-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if err := f.Chmod(0o644); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 // LoadOrRefresh returns cached ranges if present and not stale, otherwise refreshes.

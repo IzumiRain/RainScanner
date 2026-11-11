@@ -15,7 +15,7 @@
 :root{
   --ink:#04070d; --panel:#070d17; --panel-2:#0a1322; --panel-3:#0d1626;
   --line:rgba(148,163,184,.13); --line-hi:rgba(34,211,238,.28);
-  --fg:#e2e8f0; --fg-hi:#f0f9ff; --mist:#93a4ba; --mist-dim:#64748b;
+  --fg:#e2e8f0; --fg-hi:#f0f9ff; --mist:#a2b3c9; --mist-dim:#879ab3;
   --rain:#22d3ee; --ice:#a5f3fc; --sky:#60a5fa; --violet:#a78bfa;
   --ok:#34d399; --warn:#fbbf24; --err:#fb7185;
   --grad:linear-gradient(100deg,#a5f3fc 0%,#22d3ee 42%,#60a5fa 78%,#a78bfa 100%);
@@ -227,7 +227,7 @@ input[type=text],input[type=number],select,textarea{
   width:100%;background:rgba(2,6,14,.7);border:1px solid var(--line);color:var(--fg);
   border-radius:9px;padding:9px 11px;font-size:12px;font-family:var(--mono);
   transition:border-color .18s,box-shadow .18s,background .18s}
-input::placeholder,textarea::placeholder{color:#475569}
+input::placeholder,textarea::placeholder{color:#879ab3}
 input[type=text]:focus,input[type=number]:focus,select:focus,textarea:focus{
   outline:none;border-color:rgba(34,211,238,.5);background:rgba(2,6,14,.9);
   box-shadow:0 0 0 3px rgba(34,211,238,.12)}
@@ -732,6 +732,8 @@ let targets = [];         // server records: {name, cidrs, api_url, builtin}
 let target = null;        // currently selected record
 let editingName = null;   // name being edited in the modal (null = new custom)
 let es = null;
+let scanState = 'idle', activeJob = null, lastEventID = 0;
+let editorVersion = 0, editorAbort = null;
 let scanStart = 0, stageKey = '', stageStart = 0;
 
 const PENCIL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></svg>';
@@ -910,17 +912,33 @@ function setRunning(on){
   if(on) closeDrawer();
 }
 
+async function stopScan(){
+  if(scanState==='starting' || scanState==='stopping') return;
+  scanState='stopping'; $('go').disabled=true; $('status').textContent='stopping…';
+  try{
+    const response=await fetch('/api/stop',{method:'POST'});
+    if(!response.ok) throw new Error(await response.text());
+  }catch(error){
+    scanState='running'; $('go').disabled=false;
+    $('status').textContent='stop failed'; logLine('Stop failed: '+error,'l-err');
+  }
+}
+
 function parsePorts(){
-  return $('ports').value.split(',').map(s=>parseInt(s.trim(),10)).filter(n=>n>0&&n<=65535);
+  const values=$('ports').value.split(',').map(s=>s.trim());
+  if(values.some(s=>!/^\d+$/.test(s) || Number(s)<1 || Number(s)>65535)) return [];
+  return [...new Set(values.map(Number))];
 }
 
 async function start(){
-  if(es){ es.close(); es=null; fetch('/api/stop',{method:'POST'}).catch(()=>{}); setRunning(false); $('status').textContent='stopped'; return; }
+  if(scanState==='starting' || scanState==='stopping') return;
+  if(activeJob){ await stopScan(); return; }
   if(!target){ alert('Pick a CDN or add a custom range'); return; }
   const ports = parsePorts();
   if(!ports.length){ alert('Enter at least one valid port'); return; }
 
-  $('log').innerHTML=''; setRunning(true);
+  scanState='starting'; $('go').disabled=true;
+  $('log').innerHTML=''; setRunning(true); $('status').textContent='starting…';
   updateKPI('kpi-hosts',null); updateKPI('kpi-tcp',null); updateKPI('kpi-confirmed',null);
   ['kpi-hosts-sub','kpi-tcp-sub','kpi-confirmed-sub'].forEach(id=>$(id).textContent='');
   $('kpi-hosts-bar').style.width='0%';
@@ -946,30 +964,59 @@ async function start(){
   let id;
   try{
     const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-    if(!res.ok){ logLine('error: '+await res.text(),'l-err'); setRunning(false); return; }
+    if(!res.ok){ logLine('error: '+await res.text(),'l-err'); scanState='idle'; $('go').disabled=false; setRunning(false); $('status').textContent='error'; return; }
     id=(await res.json()).id;
-  }catch(e){ logLine('request failed: '+e,'l-err'); setRunning(false); return; }
+  }catch(e){ logLine('request failed: '+e,'l-err'); scanState='idle'; $('go').disabled=false; setRunning(false); $('status').textContent='error'; return; }
 
-  es=new EventSource('/api/stream?id='+id);
-  es.onmessage=ev=>{
+  activeJob=id; lastEventID=0; scanState='running'; $('go').disabled=false;
+  setRunning(true); connectStream();
+}
+
+function connectStream(){
+  const stream=new EventSource('/api/stream?id='+encodeURIComponent(activeJob)+'&after='+lastEventID);
+  es=stream;
+  stream.onopen=()=>{ if(es===stream && scanState==='running') $('status').textContent='running…'; };
+  stream.onmessage=ev=>{
+    if(es!==stream) return;
+    const eventID=Number(ev.lastEventId||0);
+    if(eventID && eventID<=lastEventID) return;
+    if(eventID) lastEventID=eventID;
     const m=JSON.parse(ev.data);
     if(m.type==='log'){ logLine(m.line, /\+ /.test(m.line)?'l-ok':null); }
     else if(m.type==='progress'){ updateProgress(m.data); }
     else if(m.type==='error'){ logLine('ERROR: '+m.line,'l-err'); }
     else if(m.type==='result'){ renderResult(m.data||{}); }
     else if(m.type==='done'){
-      es.close(); es=null; setRunning(false); $('status').textContent='done';
-      $('pfill').style.width='100%';
+      const status=m.data&&m.data.status||'done';
+      stream.close(); es=null; activeJob=null; scanState='idle'; $('go').disabled=false;
+      setRunning(false); $('status').textContent=status;
+      if(status!=='done'){
+        $('tcpips').innerHTML='<div class="empty">Scan '+(status==='stopped'?'stopped':'failed')+'.</div>';
+        $('configs').innerHTML='<div class="empty">No completed configurations from this scan.</div>';
+        $('copyConfigs').style.display='none'; $('tcpCount').textContent='';
+        $('xraySub').style.display='none'; $('xrayips').style.display='none'; $('xrayips').textContent=''; $('xrayCount').textContent='';
+        updateKPI('kpi-tcp',null); updateKPI('kpi-confirmed',null);
+        $('kpi-tcp-sub').textContent=''; $('kpi-confirmed-sub').textContent='';
+      }
+      if(status==='done') $('pfill').style.width='100%';
       document.querySelector('.pbar-thin').classList.remove('scanning');
       const t=((Date.now()-scanStart)/1000).toFixed(1);
-      $('ptext').textContent=`done in ${t}s`;
-      logLine('— finished —','l-sys');
-      document.querySelectorAll('.kpi-card').forEach(c=>{
+      $('ptext').textContent=`${status} in ${t}s`;
+      logLine(status==='done'?'Scan finished':status==='stopped'?'Scan stopped; previous saved results preserved':'Scan failed; see the error above','l-sys');
+      if(status==='done') document.querySelectorAll('.kpi-card').forEach(c=>{
         c.classList.remove('celebrate'); void c.offsetWidth; c.classList.add('celebrate');
       });
     }
   };
-  es.onerror=()=>{ logLine('stream closed','l-sys'); if(es){es.close();es=null;} setRunning(false); };
+  stream.onerror=()=>{
+    if(es!==stream) return;
+    $('status').textContent=scanState==='stopping'?'stopping; reconnecting…':'reconnecting…';
+    if(stream.readyState===EventSource.CLOSED){
+      stream.close(); es=null;
+      logLine('Scan stream disconnected. Reconnecting; Stop remains available.','l-sys');
+      setTimeout(()=>{if(activeJob&&!es) connectStream();},1000);
+    }
+  };
 }
 
 // ── target editor modal ──
@@ -978,8 +1025,9 @@ function countRanges(){
   const s=famSplit(list);
   $('cRangeCount').textContent = list.length ? (s.v6 ? `(${list.length} — ${s.v4} IPv4 / ${s.v6} IPv6)` : '('+list.length+')') : '';
 }
-function openModal(){ $('cReloadMsg').textContent=''; $('overlay').classList.add('show'); countRanges(); $('cName').focus(); }
-function closeModal(){ $('overlay').classList.remove('show'); }
+function invalidateEditor(){ editorVersion++; if(editorAbort){editorAbort.abort();editorAbort=null;} $('cReload').disabled=false; $('cSave').disabled=false; }
+function openModal(){ invalidateEditor(); $('cReloadMsg').textContent=''; $('overlay').classList.add('show'); countRanges(); ($('cName').disabled?$('cUrl'):$('cName')).focus(); }
+function closeModal(){ invalidateEditor(); $('overlay').classList.remove('show'); }
 
 function openNew(){
   editingName=null;
@@ -993,7 +1041,7 @@ function openEdit(name){
   const t=targets.find(x=>x.name===name); if(!t) return;
   editingName=name;
   $('mTitle').textContent=(t.builtin?'Edit CDN — ':'Edit custom — ')+name;
-  $('cName').value=t.name; $('cName').disabled=!!t.builtin;
+  $('cName').value=t.name; $('cName').disabled=true;
   $('cUrl').value=t.api_url||'';
   $('cRanges').value=(t.cidrs||[]).join('\n');
   $('cDelete').style.display='inline-block';
@@ -1001,19 +1049,25 @@ function openEdit(name){
 }
 
 async function saveCustom(){
-  const name=$('cName').value.trim()|| (editingName||'custom');
+  const version=editorVersion;
+  const name=editingName||$('cName').value.trim();
+  if(!name){ alert('Enter a target name'); return; }
+  if(!editingName && targets.some(t=>t.name.toLowerCase()===name.toLowerCase())){ alert('That target name already exists. Edit it from the sidebar.'); return; }
   const cidrs=$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean);
   const api_url=$('cUrl').value.trim();
   if(!cidrs.length && !api_url){ alert('Enter at least one CIDR/IP, or an API URL to reload from'); return; }
+  $('cSave').disabled=true;
   try{
     const r=await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name, cidrs, api_url})});
-    if(!r.ok){ alert('save failed: '+await r.text()); return; }
+    if(!r.ok){ if(version===editorVersion) alert('save failed: '+await r.text()); return; }
     const saved=await r.json();
+    if(version!==editorVersion) return;
     closeModal();
     target={name:saved.name};
     await loadTargets(true);
-  }catch(e){ alert('save failed: '+e); }
+  }catch(e){ if(version===editorVersion) alert('save failed: '+e); }
+  finally{ if(version===editorVersion) $('cSave').disabled=false; }
 }
 
 async function deleteTarget(){
@@ -1029,32 +1083,56 @@ async function deleteTarget(){
 }
 
 async function reloadRanges(){
+  const version=editorVersion;
   const name=$('cName').value.trim();
+  if(!editingName && targets.some(t=>t.name.toLowerCase()===name.toLowerCase())){ $('cReloadMsg').textContent='That target name already exists. Edit it from the sidebar.'; return; }
   const url=$('cUrl').value.trim();
   if(!name){ $('cReloadMsg').textContent='give it a name first (reload saves it, then fetches)'; return; }
   if(!url){ $('cReloadMsg').textContent='enter an API URL to reload from'; return; }
   $('cReloadMsg').textContent='reloading…'; $('cReload').disabled=true;
+  const controller=new AbortController(); editorAbort=controller;
   try{
     if(name){
-      await fetch('/api/targets',{method:'POST',headers:{'Content-Type':'application/json'},
+      const saved=await fetch('/api/targets',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},
         body:JSON.stringify({name, cidrs:$('cRanges').value.split('\n').map(s=>s.trim()).filter(Boolean), api_url:url})});
+      if(!saved.ok) throw new Error(await saved.text());
+      const record=await saved.json();
+      if(version!==editorVersion) return;
+      if(!editingName){
+        editingName=record.name; $('cName').value=record.name; $('cName').disabled=true;
+        $('cDelete').style.display='inline-block';
+        targets.push(record);
+      }
     }
-    const r=await fetch('/api/targets/reload',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch('/api/targets/reload',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},
       body:JSON.stringify({name, prefer_backup:!!($('prefer_backup')&&$('prefer_backup').checked)})});
-    if(!r.ok){ $('cReloadMsg').textContent='reload failed: '+await r.text(); return; }
+    if(!r.ok) throw new Error(await r.text());
     const rec=await r.json();
+    if(version!==editorVersion) return;
     $('cRanges').value=(rec.cidrs||[]).join('\n'); countRanges();
     const s=famSplit(rec.cidrs);
     $('cReloadMsg').textContent='loaded '+(rec.cidrs?rec.cidrs.length:0)+' ranges — '+s.v4+' IPv4 / '+s.v6+' IPv6';
     loadTargets(true);
-  }catch(e){ $('cReloadMsg').textContent='reload failed: '+e; }
-  finally{ $('cReload').disabled=false; }
+  }catch(e){ if(version===editorVersion && e.name!=='AbortError') $('cReloadMsg').textContent='reload failed: '+e; }
+  finally{ if(version===editorVersion){$('cReload').disabled=false;editorAbort=null;} }
 }
 
 // ── copy helpers ──
-function copyText(text, btn, ok='copied!'){
-  navigator.clipboard.writeText(text);
-  const old=btn.textContent; btn.textContent=ok; setTimeout(()=>btn.textContent=old,1200);
+async function copyText(text, btn, ok='copied!'){
+  const old=btn.textContent; btn.disabled=true;
+  try{
+    if(navigator.clipboard && window.isSecureContext){
+      await navigator.clipboard.writeText(text);
+    }else{
+      const input=document.createElement('textarea');input.value=text;
+      input.style.cssText='position:fixed;opacity:0;pointer-events:none';document.body.appendChild(input);
+      const focused=document.activeElement;
+      try{input.select();if(!document.execCommand('copy')) throw new Error('Clipboard unavailable');}
+      finally{input.remove();if(focused) focused.focus();}
+    }
+    btn.textContent=ok;
+  }catch(error){btn.textContent='copy failed';logLine('Copy failed. Select and copy the result text manually.','l-err');}
+  finally{btn.disabled=false;setTimeout(()=>btn.textContent=old,1200);}
 }
 $('copyTcp').onclick=()=>copyText($('tcpips').textContent, $('copyTcp'));
 $('copyXray').onclick=()=>copyText($('xrayips').textContent, $('copyXray'));
