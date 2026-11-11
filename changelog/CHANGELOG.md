@@ -5,7 +5,39 @@ Written by Claude (Anthropic).
 
 ---
 
-## v2.1.0 — 2026-10-04 (unreleased)
+## v2.1.1 — 2026-11-11
+
+### Fixed
+Correctness and data-integrity fixes from a full source review and runtime
+audit (PR #2 by @B3hnamR; findings and evidence in `docs/AUDIT.md`):
+- **Completed results are preserved** — cancellation, Stop, or an Xray
+  infrastructure failure no longer overwrites a previous completed result
+  file; TCP-only scans print reachable endpoints and no longer erase
+  confirmed output.
+- **Exported profiles keep their routing identity** — implicit Host/SNI is
+  materialized before the clean IP is substituted, and VMess TCP HTTP
+  obfuscation survives the round trip.
+- **Xray probing is trustworthy** — per-batch authenticated proxy inbounds,
+  leased ports, owned-child/listener health checks, and race-safe atomic
+  publication of the embedded Xray binary.
+- **Sampling is exact and bounded** — IPv4 per-/24 sample counts are exact,
+  and broad-prefix expansion is bounded and cancelable.
+- **Web UI lifecycle** — SSE terminal notification/replay, Start/Stop state
+  handling, editor request races, target-name overwrite protection, and
+  truthful clipboard feedback.
+- **Target persistence** — builtin feed overrides and canonical names
+  survive restart; stale/canceled reloads can no longer resurrect deleted
+  targets or clobber newer edits, and distinct result names no longer
+  collide on disk.
+
+### Added
+- Permanent Go and browser regression suites, optional real-Xray integration
+  tests, and a CI workflow (`go vet`, race tests, Linux/Windows builds,
+  browser suite). See `docs/TESTING.md`.
+
+---
+
+## v2.1.0 — 2026-10-04
 
 ### Added
 - **IPv6 support, end to end** — provider feeds parse the IPv6 half (AWS

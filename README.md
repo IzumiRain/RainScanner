@@ -7,7 +7,7 @@
 <sub>written by Claude (Anthropic) · binary: <code>rainscan.exe</code> · Go module: <code>cdnscan</code></sub></p>
 
 <p align="center">
-  <code>v2.1.0</code> ·
+  <code>v2.1.1</code> ·
   <a href="changelog/CHANGELOG.md">Changelog</a> ·
   <strong>English</strong> · <a href="README.fa.md">🇮🇷 فارسی</a>
 </p>
@@ -119,7 +119,7 @@ now **Stop** — to cancel.
 ## 🖥️ The GUI, panel by panel
 
 ### Header
-Logo, app name and version (`v2.1.0`), and a link to the **GitHub** repo. On small
+Logo, app name and version (`v2.1.1`), and a link to the **GitHub** repo. On small
 screens, the menu button (☰) opens the sidebar.
 
 ### Targets sidebar
@@ -287,6 +287,12 @@ Cached ranges live in `ips/<cdn>.json`; confirmed results in `results/<cdn>.json
 ## 🗒️ Changelog
 
 Full history is in **[`changelog/CHANGELOG.md`](changelog/CHANGELOG.md)**.
+
+**v2.1.1** — **Correctness and data-integrity fixes** from a full source audit (PR #2):
+completed results are no longer overwritten on cancel/failure, exported profiles
+keep their Host/SNI, Xray probe batches are authenticated, per-/24 sampling is
+exact, and SSE/target-editor lifecycle races are fixed — with a permanent Go +
+browser regression suite and CI.
 
 **v2.1.0** — **IPv6 support end to end** (dual-stack range fetching, safe IPv6
 sampling, a `family` selector in the GUI and `-family` on the CLI), a rebuilt GUI
