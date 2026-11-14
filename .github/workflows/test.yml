@@ -24,7 +24,7 @@ jobs:
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/rainscan-linux ./cmd/cdnscan
           GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o /tmp/rainscan-windows.exe ./cmd/cdnscan
   browser:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -32,8 +32,32 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install browser test dependencies
+        env:
+          PLAYWRIGHT_CACHE_HIT: ${{ steps.playwright-cache.outputs.cache-hit }}
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
-          ./node_modules/.bin/playwright-core install --with-deps chromium
+          install_browser() {
+            if [ "$PLAYWRIGHT_CACHE_HIT" = "true" ]; then
+              ./node_modules/.bin/playwright-core install chromium
+            else
+              ./node_modules/.bin/playwright-core install --with-deps chromium
+            fi
+          }
+          attempt=1
+          until install_browser; do
+            if [ "$attempt" -ge 3 ]; then
+              echo "Playwright browser install failed after $attempt attempts" >&2
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            echo "Browser install failed; retrying in 30s (attempt $attempt of 3)..."
+            sleep 30
+          done
       - run: npm run test:browser
